@@ -35,29 +35,59 @@ const firebase_client = init_firebase_client();
 
 /* 0. Helpers */
 
-function store_event(db_ref, name, fields, timestamp, version) {
+function store_stream_event(fire_app, fields, version, seq) {
 
     /* General structure of events:
 
-       events:(event_name):(auto-id):...fields...:timestamp:version
+       event_store/stream_id/event_id/event/...fields.../timestamp/version/seq
+
+       stream_id: unique identifier of the aggregate instance (such as user_id,
+                  category_id etc.). Basically an entity that should have its
+                  own identity in the system.
+
+                  For example, categories and publications have their own streams,
+                  as we need to track them, even if a publication has no content
+                  (i.e., recordings) yet. Groups on the other hand are tracked
+                  with a person's stream because they always have users, and
+                  introducing a new group should have a purpose, and therefore
+                  initial users.
+        seq: "expected_version" in other event store implementations, but I
+             think that name is misleading, especially if one tries to version
+             their events. It is a sequential number for every event in the
+             stream that, denoting chronological sequence.
+
+             Calling the function with seq=0 implies the start of a new stream.
     */
 
     Object.assign(
         fields,
         {
-            "timestamp": timestamp,
-            "version":   version
+            "timestamp": fire_app.database.ServerValue.TIMESTAMP,
+            "version":   version,
+            "seq":       seq
         }
     );
 
-    const eventObject = {};
-    eventObject[name] = fields;
-
-    return db_ref.push(eventObject);
+    return fire_app.database().ref("event_store").push(fields);
 };
 
 /* 1. People */
 
+function add_person(name, fire_app) {
+
+    /* nameObject: {
+            first: "Bala",
+            last:  "Bab"
+        },
+
+       fire_app: Firebase app instance (admin, client, etc.)
+    */
+
+    /* Start a new PEOPLE stream, returning a Firebase Realtime DB
+       promise, that can be chained. */
+    return store_event(fire_app, nameObject, 0, 0);
+
+}
 function add_user(person, account_type) {
 
     /* `person` object:
@@ -76,7 +106,7 @@ function add_user(person, account_type) {
     firebase_admin.auth().createUser({ email: person.email }).then(function(userRecord) {
 
         const db = firebase_admin.database();
-        const people_ref = db.ref("events/people");
+        const people_ref = db.ref("event_store");
         const timestamp = firebase_admin.database.ServerValue.TIMESTAMP;
 
         /* If user creation is successful, save "person_added" event, ... */
@@ -115,7 +145,7 @@ function add_user(person, account_type) {
             const account_event = account_type + "_added";
 
             store_event(
-                db.ref("events/accounts"),
+                db.ref("event_store"),
                 account_event,
                 {
                     "user_id":  userRecord.uid,
