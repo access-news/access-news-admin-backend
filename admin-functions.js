@@ -43,7 +43,7 @@ function create_stream() {
     return FIREBASE_APP.database().ref("event_store").push().key;
 }
 
-function append_event_to_stream(stream_id, event_name, fields, version) {
+function append_event_to_stream(stream_id, event, version) {
 
     /* General structure of events:
 
@@ -79,13 +79,6 @@ function append_event_to_stream(stream_id, event_name, fields, version) {
        for now.
     */
 
-    var event = {
-        "event_name": event_name,
-        "fields": fields,
-        "timestamp": FIREBASE_APP.database.ServerValue.TIMESTAMP,
-        "version":   version
-    };
-
     FIREBASE_APP.database().ref("event_store").child(stream_id).push(event);
 };
 
@@ -97,9 +90,63 @@ function start_new_stream_with_event(event_name, fields, version) {
     return id_of_new_stream;
 }
 
+/* NOTE: Event fields need to be one-dimensonal (-> easier checks) */
+function create_event(event_name, fields, version) {
+    var event = {
+        "event_name":  event_name,
+        "timestamp":   FIREBASE_APP.database.ServerValue.TIMESTAMP,
+        "version":     version
+    }
+
+    return Object.assign(event, fields);
+}
+
+/* Generate meaningful errors */
+function cast_event_payload(event_name, required_event_fields, payload) {
+    /* required_event_fields = [ "prop1", ..., "propN"]
+       payload = { field: "val", ... }
+    */
+
+    var fields = {};
+
+    const payload_properties = Object.keys(payload);
+
+    if (payload_properties.length !== required_event_fields.length) {
+        throw `Extraneous fields, expected: ${required_event_fields}, got: ${payload_properties}`
+    }
+
+    for (var i in payload_properties) {
+
+        const payload_prop = payload_properties[i];
+
+        if (required_event_fields.includes(payload_prop) === false) {
+            throw `${event_name} expects the fields: ${required_event_fields}, no match for: ${payload_prop}`
+        }
+
+        fields[payload_prop] = payload[payload_prop];
+    }
+
+    return fields;
+}
+
 /* 1. Aggregates */
 
-function People() {
+/* This would be the Elixir module equivalent, and aggregates should be
+   singletons (i.e., simple objects).
+
+   Aggregate instances, such as Person, would have their own constructor,
+   and populated with the state coming from projections. These aggregate
+   instances would be fed back to subsequent commands and parsed for
+   compatibility with the business rules.
+
+   For example,
+
+      var kilgore = new Person(projection_entry);
+
+      people.execute(kilgore, 'person_update_address', fields)
+*/
+
+const people = {
 
     //                STATE
     execute: function(person, command, payload) {
@@ -118,17 +165,34 @@ function People() {
                already be over and it means that someone chose to allow the creation
                of a new user.
             */
+
+            case 'add_person':
+                /* In this case, there is no STATE, so `this.execute`'s `person`
+                   parameter can be ignored. (Best to use an empty object.) */
+                const fields =
+                    cast_event_payload(
+                        'person_added',
+                        ['first_name', 'last_name'],
+                        payload
+                    );
+                return create_event('person_added', fields, EVENT_VERSION);
+                break;
             case 'add_user':
                 FIREBASE_APP.auth().createUser(
                     { email: payload.email }
                 ).then(
                     function(userRecord) {
+
                     }
                 )
         }
-    }
+    },
 
     apply: function() {}
+}
+
+const aggregates = {
+    people: people
 }
 
 // function add_user(fire_app, fields, account_type) {
@@ -210,5 +274,6 @@ module.exports = {
     append_event_to_stream,
     start_new_stream_with_event,
     EVENT_VERSION,
-    FIREBASE_APP
+    FIREBASE_APP,
+    aggregates
 };
