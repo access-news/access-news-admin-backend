@@ -37,6 +37,8 @@ var FIREBASE_APP = firebase_admin;
 
 /* 0. Helpers */
 
+var EVENT_VERSION = 0;
+
 function create_stream() {
     return FIREBASE_APP.database().ref("event_store").push().key;
 }
@@ -95,7 +97,111 @@ function start_new_stream_with_event(event_name, fields, version) {
     return id_of_new_stream;
 }
 
-var EVENT_VERSION = 0;
+/* 1. Aggregates */
+
+function People() {
+
+    //                STATE
+    execute: function(person, command, payload) {
+
+        switch (command) {
+
+            /* ADD_USER
+
+               Checking for the duplicate users when trying to create a new one
+               will be responsibility of the front end client (when it is ready...).
+               There can be users with the same name, etc. therefore in the
+               beginning it will be easer to use humans to decide if there is a
+               genuine duplicate or not.
+
+               Whenever this command is called, the deliberation process should
+               already be over and it means that someone chose to allow the creation
+               of a new user.
+            */
+            case 'add_user':
+                FIREBASE_APP.auth().createUser(
+                    { email: payload.email }
+                ).then(
+                    function(userRecord) {
+                    }
+                )
+        }
+    }
+
+    apply: function() {}
+}
+
+// function add_user(fire_app, fields, account_type) {
+
+//     /* `person` object:
+//        ================
+//         {
+//             name: {
+//                 first: "Bala",
+//                 last:  "Bab"
+//             },
+//             email: "ema@il.com"
+//         }
+
+//         `account_type`: [ "admin" | "reader" | "listener" ]
+//     */
+
+//     firebase_admin.auth().createUser({ email: person.email }).then(function(userRecord) {
+
+//         const db = firebase_admin.database();
+//         const people_ref = db.ref("event_store");
+//         const timestamp = firebase_admin.database.ServerValue.TIMESTAMP;
+
+//         /* If user creation is successful, save "person_added" event, ... */
+
+//         store_event(
+//             people_ref,
+//             "person_added",
+//             {
+//                 "user_id": userRecord.uid,
+//                 "name": {
+//                     "first": person.name.first,
+//                     "last":  person.name.last
+//                 }
+//             },
+//             timestamp,
+//             0
+
+//         ).then(function(_ref) {
+
+//             /* ... save "person_email_added" after above event finishes, and ... */
+
+//             store_event(
+//                 people_ref,
+//                 "person_email_added",
+//                 {
+//                     "user_id": userRecord.uid,
+//                     "value":   person.email
+//                 },
+//                 timestamp,
+//                 0
+//             )
+//         }).then(function(_ref) {
+
+//             /* ... finally store the "<account>_added" event. */
+
+//             const account_event = account_type + "_added";
+
+//             store_event(
+//                 db.ref("event_store"),
+//                 account_event,
+//                 {
+//                     "user_id":  userRecord.uid,
+//                     "username": person.email
+//                 },
+//                 timestamp,
+//                 0
+//             );
+//         }).catch(function(error) { console.log(error) });
+
+//         firebase_client.auth().sendPasswordResetEmail(person.email);
+//     });
+// };
 
 module.exports = {
     firebase_admin,
