@@ -37,12 +37,6 @@ var FIREBASE_APP = firebase_admin;
 
 /* 0. Helpers */
 
-var EVENT_VERSION = 0;
-
-function create_new_stream() {
-    return FIREBASE_APP.database().ref("event_store").push().key;
-}
-
 /* General structure of events:
 
                                     ----- event object ------
@@ -77,45 +71,47 @@ function create_new_stream() {
     for now.
 */
 
+var EVENT_VERSION = 0;
+
+function create_new_stream() {
+    return FIREBASE_APP.database().ref("event_store").push().key;
+}
+
 // ! Use events created with `create_event`
 function append_event_to_stream(stream_id, event) {
 
     FIREBASE_APP.database().ref("event_store").child(stream_id).push(event);
 };
 
-function start_new_stream_with_event(event) {
+// function start_new_stream_with_event(event) {
 
-    const id_of_new_stream = create_new_stream();
-    append_event_to_stream(id_of_new_stream, event);
+//     const id_of_new_stream = create_new_stream();
+//     append_event_to_stream(id_of_new_stream, event);
 
-    return id_of_new_stream;
-}
+//     return id_of_new_stream;
+// }
 
 /* NOTE: Event fields need to be one-dimensonal (-> easier checks) */
 function create_event(o) {
 
-    /* o =
-        {
-           event_name:      'person_added',
-           required_fields: [ "prop1", ..., "propN"],
-           payload:         { field: "val", ... },
-           version:         EVENT_VERSION
+    /*  {
+            "aggregate_type":  aggregate_type,
+            "event_name": c.event_name,
+            "fields":     fields,
+            "timestamp":  FIREBASE_APP.database.ServerValue.TIMESTAMP,
+            "version":    EVENT_VERSION
         }
+
+    `fields` parameter is the payload, after being casted
+
     */
 
-    const fields =
-        cast_event_payload(
-            {
-                event_name:      o.event_name,
-                required_fields: o.required_fields,
-                payload:         o.payload
-            });
-
     var event = {
-        "event_name":  o.event_name,
-        "fields":      fields,
-        "timestamp":   FIREBASE_APP.database.ServerValue.TIMESTAMP,
-        "version":     o.version
+        "aggregate":  o.aggregate_type,
+        "event_name": o.event_name,
+        "fields":     o.fields,
+        "timestamp":  FIREBASE_APP.database.ServerValue.TIMESTAMP,
+        "version":    o.version
     }
 
     return event;
@@ -125,7 +121,6 @@ function create_event(o) {
 function cast_event_payload(o) {
 
     /* {
-           event_name:      'person_added',
            required_fields: [ "prop1", ..., "propN"],
            payload:         { field: "val", ... }
        }
@@ -144,7 +139,7 @@ function cast_event_payload(o) {
         const payload_prop = payload_properties[i];
 
         if (o.required_fields.includes(payload_prop) === false) {
-            throw `${o.event_name} expects the fields: ${o.required_fields}, no match for: ${payload_prop}`
+            throw `Required fields ${o.required_fields} do not match ${payload_prop}`
         }
 
         fields[payload_prop] = o.payload[payload_prop];
@@ -172,25 +167,11 @@ function cast_event_payload(o) {
 
 const people = {
 
-    new_person: new (function Person() {})(),
-
     //                STATE
     execute: function(person, command, payload) {
 
         switch (command) {
 
-            /* ADD_PERSON
-
-               Checking for the duplicate entries when trying to create a new one
-               will be responsibility of the front end client (when it is ready...).
-               There can be users with the same name, etc. therefore in the
-               beginning it will be easer to use humans to decide if there is a
-               genuine duplicate or not.
-
-               Whenever this command is called, the deliberation process should
-               already be over and it means that someone chose to allow the creation
-               of a new user.
-            */
 
             case 'add_person':
                 /* In this case, there is no STATE, so `this.execute`'s `person`
@@ -284,7 +265,7 @@ const people = {
 
         const ref = f.FIREBASE_APP.database().ref('people').child(stream_id);
 
-        var projectile = 
+        var projectile =
             {
                 /* At one point use this to only evaluate events from the
                    point where they haven't been applied yet. */
@@ -318,6 +299,16 @@ const people = {
             to it, listening to new events within the stream. When a
             new event comes in, it will be `apply`ed (i.e., projections
             updated).
+
+            event_store
+                -LJ16Q8UiM6eJWyesqGO (stream) -> attach new listener to new child
+                    -LJ16Q8XDTfk0Z_r14EA (event) -> listener projects the data
+                    -LJ282RXV-TCLxxOh-xS (event)
+                -LJ2F09G2M_YWB78BNo_ (stream)
+                    -LJ2F09KfLTSKOXf7vlN (event)
+                    -LJ2NVlbYvz9ptVpiCkj (event)
+                    -LJ2OL1NZEQBpiA_mPDh (event)
+                    -LJ2TkQjSfhV39SXWoDh (event)
 */
 function cling() {
 
@@ -335,7 +326,95 @@ function cling() {
 }
 
 const aggregates = {
-    people: people
+
+    new_person: function() {
+        function People() {
+            this.type = 'people';
+        }
+        return new People();
+    },
+};
+
+const commands = {
+
+//  AGGREGATE
+    people: {
+
+        /* ADD_PERSON
+
+            Checking for the duplicate entries when trying to create a new one
+            will be responsibility of the front end client (when it is ready...).
+            There can be users with the same name, etc. therefore in the
+            beginning it will be easer to use humans to decide if there is a
+            genuine duplicate or not.
+
+            Whenever this command is called, the deliberation process should
+            already be over and it means that someone chose to allow the creation
+            of a new user.
+        */
+        add_person: {
+            event_name:      'person_added',
+            required_fields: ['first_name', 'last_name'],
+        },
+
+        add_email: {
+            event_name:      'email_added',
+            required_fields: ['email'],
+        },
+
+        update_email: {
+            event_name:      'email_updated',
+            required_fields: ['email', 'event_id'],
+        },
+
+        add_user: {}
+    }
+}
+
+//               ------ STATE -----
+function execute(aggregate_instance, command, payload, callback) {
+//               {} or null if new
+//               OR plainly ignored
+
+    /* REQUIRED PARAMETERS:
+       + aggregate_instance
+       + command
+       + payload
+    */
+
+    if (callback) {
+        callback();
+    }
+
+    const is_stream_new = ( command.startsWith('add') === true);
+    const stream_id = (is_stream_new) ? create_new_stream() : aggregate_instance.stream_id;
+
+    const aggregate_type = aggregate_instance.type;
+    const c = commands[aggregate_type][command];
+
+    if (c === undefined) {
+        throw `Command "${command}" does not exist`;
+    }
+
+    const fields =
+        cast_event_payload(
+            {
+                "required_fields": c.required_fields,
+                "payload":         payload
+            });
+
+    const event =
+        create_event(
+            {
+                "aggregate_type":  aggregate_type,
+                "event_name": c.event_name,
+                "fields":     fields,
+                "timestamp":  FIREBASE_APP.database.ServerValue.TIMESTAMP,
+                "version":    EVENT_VERSION
+            }
+        );
+
+    append_event_to_stream(stream_id, event);
 }
 
 // function add_user(fire_app, fields, account_type) {
@@ -415,9 +494,10 @@ module.exports = {
     firebase_client,
     create_new_stream,
     append_event_to_stream,
-    start_new_stream_with_event,
     EVENT_VERSION,
     FIREBASE_APP,
     aggregates,
+    execute,
+    commands,
     cling
 };
