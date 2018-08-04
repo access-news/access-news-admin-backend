@@ -39,91 +39,115 @@ var FIREBASE_APP = firebase_admin;
 
 var EVENT_VERSION = 0;
 
-function create_stream() {
+function create_new_stream() {
     return FIREBASE_APP.database().ref("event_store").push().key;
 }
 
-function append_event_to_stream(stream_id, event, version) {
+/* General structure of events:
 
-    /* General structure of events:
+                                    ----- event object ------
+    event_store/stream_id/event_id/{event_name,...fields...},timestamp,version,seq
 
-                                      ----- event object ------
-       event_store/stream_id/event_id/{event_name/...fields...},timestamp,version,seq
+    stream_id: unique identifier of the aggregate instance (such as user_id,
+                category_id etc.). Basically an entity that should have its
+                own identity in the system.
 
-       stream_id: unique identifier of the aggregate instance (such as user_id,
-                  category_id etc.). Basically an entity that should have its
-                  own identity in the system.
+                For example, categories and publications have their own streams,
+                as we need to track them, even if a publication has no content
+                (i.e., recordings) yet. Groups on the other hand are tracked
+                with a person's stream because they always have users, and
+                introducing a new group should have a purpose, and therefore
+                initial users.
 
-                  For example, categories and publications have their own streams,
-                  as we need to track them, even if a publication has no content
-                  (i.e., recordings) yet. Groups on the other hand are tracked
-                  with a person's stream because they always have users, and
-                  introducing a new group should have a purpose, and therefore
-                  initial users.
+                Ignored, when seq===0
 
-                  Ignored, when seq===0
+    seq: "expected_version" in other event store implementations, but I
+            think that name is misleading, especially if one tries to version
+            their events. It is a sequential number for every event in the
+            stream that, denoting chronological sequence.
 
-        seq: "expected_version" in other event store implementations, but I
-             think that name is misleading, especially if one tries to version
-             their events. It is a sequential number for every event in the
-             stream that, denoting chronological sequence.
+            Calling the function with seq===0 implies the start of a new stream.
+*/
 
-             Calling the function with seq===0 implies the start of a new stream.
-    */
+/* DROPPING SEQ (may regret it soon after)
 
-    /* DROPPING SEQ (may regret it soon after)
+    I don't really know how to enqueue events headed to the store to enforce
+    order, but every event has a push ID (client side date) and a server
+    timestamp. These are not infallible though, so I will plan for best effort
+    for now.
+*/
 
-       I don't really know how to enqueue events headed to the store to enforce
-       order, but every event has a push ID (client side date) and a server
-       timestamp. These are not infallible though, so I will plan for best effort
-       for now.
-    */
+// ! Use events created with `create_event`
+function append_event_to_stream(stream_id, event) {
 
     FIREBASE_APP.database().ref("event_store").child(stream_id).push(event);
 };
 
-function start_new_stream_with_event(event_name, fields, version) {
+function start_new_stream_with_event(event) {
 
-    const id_of_new_stream = create_stream();
-    append_event_to_stream(id_of_new_stream, event_name, fields, version);
+    const id_of_new_stream = create_new_stream();
+    append_event_to_stream(id_of_new_stream, event);
 
     return id_of_new_stream;
 }
 
 /* NOTE: Event fields need to be one-dimensonal (-> easier checks) */
-function create_event(event_name, fields, version) {
+function create_event(o) {
+
+    /* o =
+        {
+           event_name:      'person_added',
+           required_fields: [ "prop1", ..., "propN"],
+           payload:         { field: "val", ... },
+           version:         EVENT_VERSION
+        }
+    */
+
+    const fields =
+        cast_event_payload(
+            {
+                event_name:      o.event_name,
+                required_fields: o.required_fields,
+                payload:         o.payload
+            });
+
     var event = {
-        "event_name":  event_name,
+        "event_name":  o.event_name,
+        "fields":      fields,
         "timestamp":   FIREBASE_APP.database.ServerValue.TIMESTAMP,
-        "version":     version
+        "version":     o.version
     }
 
-    return Object.assign(event, fields);
+    return event;
 }
 
 /* Generate meaningful errors */
-function cast_event_payload(event_name, required_event_fields, payload) {
-    /* required_event_fields = [ "prop1", ..., "propN"]
-       payload = { field: "val", ... }
+function cast_event_payload(o) {
+
+    /* {
+           event_name:      'person_added',
+           required_fields: [ "prop1", ..., "propN"],
+           payload:         { field: "val", ... }
+       }
     */
 
     var fields = {};
 
-    const payload_properties = Object.keys(payload);
+    const payload_properties = Object.keys(o.payload);
 
-    if (payload_properties.length !== required_event_fields.length) {
-        throw `Extraneous fields, expected: ${required_event_fields}, got: ${payload_properties}`
+    if (payload_properties.length !== o.required_fields.length) {
+        throw `Extraneous fields, expected: ${o.required_fields}, got: ${payload_properties}`
     }
 
     for (var i in payload_properties) {
 
         const payload_prop = payload_properties[i];
 
-        if (required_event_fields.includes(payload_prop) === false) {
-            throw `${event_name} expects the fields: ${required_event_fields}, no match for: ${payload_prop}`
+        if (o.required_fields.includes(payload_prop) === false) {
+            throw `${o.event_name} expects the fields: ${o.required_fields}, no match for: ${payload_prop}`
         }
 
-        fields[payload_prop] = payload[payload_prop];
+        fields[payload_prop] = o.payload[payload_prop];
     }
 
     return fields;
@@ -148,14 +172,16 @@ function cast_event_payload(event_name, required_event_fields, payload) {
 
 const people = {
 
+    new_person: new (function Person() {})(),
+
     //                STATE
     execute: function(person, command, payload) {
 
         switch (command) {
 
-            /* ADD_USER
+            /* ADD_PERSON
 
-               Checking for the duplicate users when trying to create a new one
+               Checking for the duplicate entries when trying to create a new one
                will be responsibility of the front end client (when it is ready...).
                There can be users with the same name, etc. therefore in the
                beginning it will be easer to use humans to decide if there is a
@@ -168,15 +194,75 @@ const people = {
 
             case 'add_person':
                 /* In this case, there is no STATE, so `this.execute`'s `person`
-                   parameter can be ignored. (Best to use an empty object.) */
-                const fields =
-                    cast_event_payload(
-                        'person_added',
-                        ['first_name', 'last_name'],
-                        payload
+                   parameter can be ignored. (Best to use an empty object.)
+
+                   For example:
+                   > f.aggregates.people.execute({},'add_person', { first_name: "a", last_name: "b"})
+                */
+
+                start_new_stream_with_event(
+                    create_event(
+                        {
+                            event_name:      'person_added',
+                            required_fields: ['first_name', 'last_name'],
+                            payload:         payload,
+                            version:         EVENT_VERSION
+                        })
                     );
-                return create_event('person_added', fields, EVENT_VERSION);
+
                 break;
+
+            case 'add_email':
+
+                /* Just like with `add_person', not checking for duplicates here */
+
+                append_event_to_stream(
+                    person.stream_id,
+                    create_event(
+                        {
+                            event_name:      'email_added',
+                            required_fields: ['email'],
+                            payload:         payload,
+                            version:         EVENT_VERSION
+                        })
+                );
+
+                break;
+
+            case 'update_email':
+
+                append_event_to_stream(
+                    person.stream_id,
+                    create_event(
+                        {
+                            event_name:      'email_updated',
+                            required_fields: ['email', 'event_id'],
+                            payload:         payload,
+                            version:         EVENT_VERSION
+                        })
+                );
+
+                break;
+
+            case 'delete_email':
+
+                append_event_to_stream(
+                    person.stream_id,
+                    create_event(
+                        {
+                            event_name:      'email_updated',
+                            required_fields: ['event_id'],
+                            payload:         payload,
+                            version:         EVENT_VERSION
+                        })
+                );
+
+                break;
+
+            /* ADD_USER
+
+               Comparing email addresses in the same group to filter out duplicates.
+            */
             case 'add_user':
                 FIREBASE_APP.auth().createUser(
                     { email: payload.email }
@@ -188,7 +274,64 @@ const people = {
         }
     },
 
-    apply: function() {}
+    apply: function(eventSnapshot) {
+
+        // ALWAYS make sure applying events are idempotent.
+        // ================================================
+
+        const event     = eventSnapshot.val();
+        const stream_id = eventSnapshot.ref.getParent().getKey();
+
+        const ref = f.FIREBASE_APP.database().ref('people').child(stream_id);
+
+        var projectile = 
+            {
+                /* At one point use this to only evaluate events from the
+                   point where they haven't been applied yet. */
+                "latest_event_id": eventSnapshot.ref.getKey()
+            };
+
+        switch (event.event_name) {
+
+            case 'person_added':
+                projectile["name"] = event.fields;
+                break;
+
+            case 'email_added':
+                Object.assign(projectile, event.fields)
+                break;
+        }
+
+        ref.update(projectile);
+    }
+}
+
+/* Whenever the admin server (i.e., the Node REPL for now) restarts
+   for whatever reason, this file will be required, and this function
+   will run.
+
+   Purpose: (1) Attach a listener to 'event_store', that will
+            (2) attach a listener to each stream_id to listen to
+                new events.
+
+            When a new stream is started, (1) will attach a listener
+            to it, listening to new events within the stream. When a
+            new event comes in, it will be `apply`ed (i.e., projections
+            updated).
+*/
+function cling() {
+
+    const event_store = FIREBASE_APP.database().ref('event_store');
+
+    event_store.on(
+        'child_added',
+        function(stream) {
+            event_store.child(stream.key).on(
+                'child_added',
+                aggregates.people.apply
+            );
+        }
+    );
 }
 
 const aggregates = {
@@ -270,10 +413,11 @@ const aggregates = {
 module.exports = {
     firebase_admin,
     firebase_client,
-    create_stream,
+    create_new_stream,
     append_event_to_stream,
     start_new_stream_with_event,
     EVENT_VERSION,
     FIREBASE_APP,
-    aggregates
+    aggregates,
+    cling
 };
