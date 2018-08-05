@@ -319,7 +319,7 @@ function cling() {
         function(stream) {
             event_store.child(stream.key).on(
                 'child_added',
-                aggregates.people.apply
+                apply
             );
         }
     );
@@ -327,11 +327,46 @@ function cling() {
 
 const aggregates = {
 
-    new_person: function() {
-        function People() {
-            this.type = 'people';
+    people: {
+
+        new_instance: function() {
+
+            function Person() {
+                this.type = 'people';
+            }
+            return new Person();
+        },
+
+        commands: {
+            "add_person": {
+                event_name:      'person_added',
+                required_fields: ['first_name', 'last_name'],
+            },
+
+            "add_email": {
+                event_name:      'email_added',
+                required_fields: ['email'],
+            },
+
+            "update_email": {
+                event_name:      'email_updated',
+                required_fields: ['email', 'event_id'],
+            },
+
+            "add_user": {}
+        },
+
+        event_handlers: {
+
+            "person_added": function(event) {
+                return { "name": event.fields };
+            },
+
+            // If no handler specified for event, use this.
+            "generic": function(event) {
+                return event.fields;
+            },
         }
-        return new People();
     },
 };
 
@@ -352,22 +387,6 @@ const commands = {
             already be over and it means that someone chose to allow the creation
             of a new user.
         */
-        add_person: {
-            event_name:      'person_added',
-            required_fields: ['first_name', 'last_name'],
-        },
-
-        add_email: {
-            event_name:      'email_added',
-            required_fields: ['email'],
-        },
-
-        update_email: {
-            event_name:      'email_updated',
-            required_fields: ['email', 'event_id'],
-        },
-
-        add_user: {}
     }
 }
 
@@ -386,11 +405,11 @@ function execute(aggregate_instance, command, payload, callback) {
         callback();
     }
 
-    const is_stream_new = ( command.startsWith('add') === true);
+    const is_stream_new = (aggregate_instance.stream_id === undefined);
     const stream_id = (is_stream_new) ? create_new_stream() : aggregate_instance.stream_id;
 
     const aggregate_type = aggregate_instance.type;
-    const c = commands[aggregate_type][command];
+    const c = aggregates[aggregate_type]["commands"][command];
 
     if (c === undefined) {
         throw `Command "${command}" does not exist`;
@@ -415,6 +434,33 @@ function execute(aggregate_instance, command, payload, callback) {
         );
 
     append_event_to_stream(stream_id, event);
+}
+
+function apply(eventSnapshot) {
+
+    // ALWAYS make sure applying events are idempotent.
+    // ================================================
+
+    const event = eventSnapshot.val();
+    const aggregate = event.aggregate;
+    const stream_id = eventSnapshot.ref.getParent().getKey();
+    const event_id  = eventSnapshot.ref.getKey();
+
+    const ref = f.FIREBASE_APP.database().ref(aggregate).child(stream_id);
+
+    const eh = aggregates[aggregate]["event_handlers"];
+    const is_event_handler_defined = ( eh[event.event_name] !== undefined );
+    const event_handler =
+        (is_event_handler_defined) ? eh[event.event_name] : eh["generic"];
+
+    var projectile = event_handler(event);
+
+    /* TODO: At one point use this to only evaluate events from the
+                point where they haven't been applied yet. */
+    projectile["latest_event_id"] = event_id;
+
+    /* TODO: Add events to "events" too!
+    ref.update(projectile);
 }
 
 // function add_user(fire_app, fields, account_type) {
