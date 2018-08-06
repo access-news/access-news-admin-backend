@@ -77,10 +77,26 @@ function create_new_stream() {
     return FIREBASE_APP.database().ref("event_store").push().key;
 }
 
-// ! Use events created with `create_event`
+/* Function name is misleading because it also saves events to
+   `/events`. Wanted to use the `Reference.update()` transaction,
+   hence the reason why didn't just create another function.
+
+   Another option would've been to add it to apply, but this is
+   the right place to put it logically, when the event is created
+   in `execute()`.
+*/
 function append_event_to_stream(stream_id, event) {
 
-    FIREBASE_APP.database().ref("event_store").child(stream_id).push(event);
+    const db = FIREBASE_APP.database();
+    const event_id = db.ref("event_store").child(stream_id).push().key;
+
+    event["stream_id"] = stream_id;
+
+    var updates = {};
+    updates[`/event_store/${stream_id}/${event_id}`] = event;
+    updates[`/events/${event_id}`] = event;
+
+    db.ref().update(updates);
 };
 
 // function start_new_stream_with_event(event) {
@@ -148,167 +164,24 @@ function cast_event_payload(o) {
     return fields;
 }
 
-/* 1. Aggregates */
+/* Purpose: (1) Attach a listener to 'event_store', that will
+         (2) attach a listener to each stream_id to listen to
+             new events.
 
-/* This would be the Elixir module equivalent, and aggregates should be
-   singletons (i.e., simple objects).
+         When a new stream is started, (1) will attach a listener
+         to it, listening to new events within the stream. When a
+         new event comes in, it will be `apply`ed (i.e., projections
+         updated).
 
-   Aggregate instances, such as Person, would have their own constructor,
-   and populated with the state coming from projections. These aggregate
-   instances would be fed back to subsequent commands and parsed for
-   compatibility with the business rules.
-
-   For example,
-
-      var kilgore = new Person(projection_entry);
-
-      people.execute(kilgore, 'person_update_address', fields)
-*/
-
-const people = {
-
-    //                STATE
-    execute: function(person, command, payload) {
-
-        switch (command) {
-
-
-            case 'add_person':
-                /* In this case, there is no STATE, so `this.execute`'s `person`
-                   parameter can be ignored. (Best to use an empty object.)
-
-                   For example:
-                   > f.aggregates.people.execute({},'add_person', { first_name: "a", last_name: "b"})
-                */
-
-                start_new_stream_with_event(
-                    create_event(
-                        {
-                            event_name:      'person_added',
-                            required_fields: ['first_name', 'last_name'],
-                            payload:         payload,
-                            version:         EVENT_VERSION
-                        })
-                    );
-
-                break;
-
-            case 'add_email':
-
-                /* Just like with `add_person', not checking for duplicates here */
-
-                append_event_to_stream(
-                    person.stream_id,
-                    create_event(
-                        {
-                            event_name:      'email_added',
-                            required_fields: ['email'],
-                            payload:         payload,
-                            version:         EVENT_VERSION
-                        })
-                );
-
-                break;
-
-            case 'update_email':
-
-                append_event_to_stream(
-                    person.stream_id,
-                    create_event(
-                        {
-                            event_name:      'email_updated',
-                            required_fields: ['email', 'event_id'],
-                            payload:         payload,
-                            version:         EVENT_VERSION
-                        })
-                );
-
-                break;
-
-            case 'delete_email':
-
-                append_event_to_stream(
-                    person.stream_id,
-                    create_event(
-                        {
-                            event_name:      'email_updated',
-                            required_fields: ['event_id'],
-                            payload:         payload,
-                            version:         EVENT_VERSION
-                        })
-                );
-
-                break;
-
-            /* ADD_USER
-
-               Comparing email addresses in the same group to filter out duplicates.
-            */
-            case 'add_user':
-                FIREBASE_APP.auth().createUser(
-                    { email: payload.email }
-                ).then(
-                    function(userRecord) {
-
-                    }
-                )
-        }
-    },
-
-    apply: function(eventSnapshot) {
-
-        // ALWAYS make sure applying events are idempotent.
-        // ================================================
-
-        const event     = eventSnapshot.val();
-        const stream_id = eventSnapshot.ref.getParent().getKey();
-
-        const ref = f.FIREBASE_APP.database().ref('people').child(stream_id);
-
-        var projectile =
-            {
-                /* At one point use this to only evaluate events from the
-                   point where they haven't been applied yet. */
-                "latest_event_id": eventSnapshot.ref.getKey()
-            };
-
-        switch (event.event_name) {
-
-            case 'person_added':
-                projectile["name"] = event.fields;
-                break;
-
-            case 'email_added':
-                Object.assign(projectile, event.fields)
-                break;
-        }
-
-        ref.update(projectile);
-    }
-}
-
-/* Whenever the admin server (i.e., the Node REPL for now) restarts
-   for whatever reason, this file will be required, and this function
-   will run.
-
-   Purpose: (1) Attach a listener to 'event_store', that will
-            (2) attach a listener to each stream_id to listen to
-                new events.
-
-            When a new stream is started, (1) will attach a listener
-            to it, listening to new events within the stream. When a
-            new event comes in, it will be `apply`ed (i.e., projections
-            updated).
-
-            event_store
-                -LJ16Q8UiM6eJWyesqGO (stream) -> attach new listener to new child
-                    -LJ16Q8XDTfk0Z_r14EA (event) -> listener projects the data
-                    -LJ282RXV-TCLxxOh-xS (event)
-                -LJ2F09G2M_YWB78BNo_ (stream)
-                    -LJ2F09KfLTSKOXf7vlN (event)
-                    -LJ2NVlbYvz9ptVpiCkj (event)
-                    -LJ2OL1NZEQBpiA_mPDh (event)
-                    -LJ2TkQjSfhV39SXWoDh (event)
+         event_store
+             -LJ16Q8UiM6eJWyesqGO (stream) -> attach new listener to new child
+                 -LJ16Q8XDTfk0Z_r14EA (event) -> listener projects the data
+                 -LJ282RXV-TCLxxOh-xS (event)
+             -LJ2F09G2M_YWB78BNo_ (stream)
+                 -LJ2F09KfLTSKOXf7vlN (event)
+                 -LJ2NVlbYvz9ptVpiCkj (event)
+                 -LJ2OL1NZEQBpiA_mPDh (event)
+                 -LJ2TkQjSfhV39SXWoDh (event)
 */
 function cling() {
 
@@ -446,7 +319,7 @@ function apply(eventSnapshot) {
     const stream_id = eventSnapshot.ref.getParent().getKey();
     const event_id  = eventSnapshot.ref.getKey();
 
-    const ref = f.FIREBASE_APP.database().ref(aggregate).child(stream_id);
+    const ref = f.FIREBASE_APP.database().ref(`/state/${aggregate}`).child(stream_id);
 
     const eh = aggregates[aggregate]["event_handlers"];
     const is_event_handler_defined = ( eh[event.event_name] !== undefined );
@@ -459,7 +332,6 @@ function apply(eventSnapshot) {
                 point where they haven't been applied yet. */
     projectile["latest_event_id"] = event_id;
 
-    /* TODO: Add events to "events" too!
     ref.update(projectile);
 }
 
@@ -547,3 +419,14 @@ module.exports = {
     commands,
     cling
 };
+
+// const f = require('./admin-functions.js');
+// const p1 = f.aggregates.people.new_instance();
+// f.execute(p1, 'add_person', { first_name: "Kilgore", last_name: "Troutman"})
+// const p2 = f.aggregates.people.new_instance();
+// f.cling()
+// f.execute(p2, 'add_person', { first_name: "Jorge", last_name: "Avenfasz"})
+// f.execute({stream_id: "-LJCPft0DosnGIPgvgei", type: "people"}, 'add_email', { email: "jorge@el.com"})
+// f.execute({stream_id: "-LJCPft0DosnGIPgvgei", type: "people"}, 'add_email', { email: "jorge@nemel.com"})
+// f.execute({stream_id: "-LJCPIVTTQEiiMkeNJqG", type: "people"}, 'add_email', { email: "val@ami.com"})
+
