@@ -90,6 +90,8 @@ function append_event_to_stream(stream_id, event) {
     const db = FIREBASE_APP.database();
     const event_id = db.ref("event_store").child(stream_id).push().key;
 
+    // This one is needed to look up the the right aggregate when fetching
+    // events from `/events`.
     event["stream_id"] = stream_id;
 
     var updates = {};
@@ -165,8 +167,8 @@ function cast_event_payload(o) {
 }
 
 /* Purpose: (1) Attach a listener to 'event_store', that will
-         (2) attach a listener to each stream_id to listen to
-             new events.
+            (2) attach a listener to each stream_id to listen to
+                new events.
 
          When a new stream is started, (1) will attach a listener
          to it, listening to new events within the stream. When a
@@ -192,7 +194,7 @@ function cling() {
         function(stream) {
             event_store.child(stream.key).on(
                 'child_added',
-                apply
+                applicator
             );
         }
     );
@@ -216,6 +218,11 @@ const aggregates = {
                 required_fields: ['first_name', 'last_name'],
             },
 
+            "change_name": {
+                event_name: 'person_name_changed',
+                required_fields: ['first_name', 'last_name']
+            },
+
             "add_email": {
                 event_name:      'email_added',
                 required_fields: ['email'],
@@ -229,15 +236,67 @@ const aggregates = {
             "add_user": {}
         },
 
+        /* Used by `applicator`. These are the actual `apply` functions
+           to mutate the state of a specifig aggregate instance applying the
+           provided event. In `applicator` they are actually called `apply`.
+        */
         event_handlers: {
 
-            "person_added": function(event) {
-                return { "name": event.fields };
+            /* Don't need the previous state, because this command creates a
+               brand new instance, so there is nothing to mess up. */
+            "person_added": function(event_snapshot) {
+                return { "name": event_snapshot.val().fields };
             },
 
-            // If no handler specified for event, use this.
-            "generic": function(event) {
-                return event.fields;
+            "person_name_changed": function(event_snapshot, previous_state_snapshot) {
+                const event    = event_snapshot.val();
+                // The previous state will be used to build the new state.
+                var state    = previous_state_snapshot.val();
+
+                state["name"] = event.fields;
+
+                return state;
+            },
+
+            "email_added": function(event_snapshot, previous_state_snapshot) {
+
+                const event    = event_snapshot.val();
+                const event_id = event_snapshot.ref.getKey();
+
+                // The previous state will be used to build the new state.
+                var state    = previous_state_snapshot.val();
+
+                // Check if any emails have been added previously
+                if (state.emails === undefined) {
+                    state["emails"] = {};
+                    state.emails[event_id] = event.fields.email;
+                } else {
+                    var update = {};
+                    update[event_id] = event.fields.email;
+                    Object.assign(state.emails, update);
+                };
+
+                // Return the mutated state.
+                return state;
+            },
+
+            "email_updated": function(event_snapshot, previous_state_snapshot) {
+
+                const event    = event_snapshot.val();
+
+                // The previous state will be used to build the new state.
+                var state    = previous_state_snapshot.val();
+
+                state.emails[event.fields.event_id] = event.fields.email;
+
+                // Return the mutated state.
+                return state;
+            },
+
+            // if no handler specified for event, use this.
+            "generic": function(event_snapshot, previous_state_snapshot) {
+                var state = previous_state_snapshot.val();
+                return Object.assign(state, event_snapshot.val().fields);
             },
         }
     },
@@ -245,30 +304,30 @@ const aggregates = {
 
 const commands = {
 
-//  AGGREGATE
+//  aggregate
     people: {
 
-        /* ADD_PERSON
+        /* add_person
 
-            Checking for the duplicate entries when trying to create a new one
+            checking for the duplicate entries when trying to create a new one
             will be responsibility of the front end client (when it is ready...).
-            There can be users with the same name, etc. therefore in the
+            there can be users with the same name, etc. therefore in the
             beginning it will be easer to use humans to decide if there is a
             genuine duplicate or not.
 
-            Whenever this command is called, the deliberation process should
+            whenever this command is called, the deliberation process should
             already be over and it means that someone chose to allow the creation
             of a new user.
         */
     }
 }
 
-//               ------ STATE -----
+//               ------ state -----
 function execute(aggregate_instance, command, payload, callback) {
 //               {} or null if new
-//               OR plainly ignored
+//               or plainly ignored
 
-    /* REQUIRED PARAMETERS:
+    /* required parameters:
        + aggregate_instance
        + command
        + payload
@@ -285,7 +344,7 @@ function execute(aggregate_instance, command, payload, callback) {
     const c = aggregates[aggregate_type]["commands"][command];
 
     if (c === undefined) {
-        throw `Command "${command}" does not exist`;
+        throw `command "${command}" does not exist`;
     }
 
     const fields =
@@ -293,7 +352,8 @@ function execute(aggregate_instance, command, payload, callback) {
             {
                 "required_fields": c.required_fields,
                 "payload":         payload
-            });
+            }
+        );
 
     const event =
         create_event(
@@ -309,30 +369,63 @@ function execute(aggregate_instance, command, payload, callback) {
     append_event_to_stream(stream_id, event);
 }
 
-function apply(eventSnapshot) {
+/* In other Event Sourcing implementations, the `apply` function
+   has 2 arguments:
+
+     + the previous state and
+     + an event (to update the previous state).
+
+   Due to the usage of Firebase's Realtime Databse, this function
+   is only the callback of the listeners attached to new events,
+   that only takes one argument of DataSnapshot type.
+
+   Therefore, we fetch the previous state from
+   `/state/(aggregate)/(stream_id).
+
+   --------------------------------------------------------------
+
+   ANOTHER APPROACH would be to include the previous state of the
+   specific aggregate attribute (eg. people's email) in the COMMANDS
+   so that it would be readily avaiable on update, but this seems
+   cleaner.
+
+   Also, a downside of fetching the state in `apply`, is that this
+   results in another database query.
+*/
+function applicator(event_snapshot) {
 
     // ALWAYS make sure applying events are idempotent.
     // ================================================
 
-    const event = eventSnapshot.val();
+    const event = event_snapshot.val();
     const aggregate = event.aggregate;
-    const stream_id = eventSnapshot.ref.getParent().getKey();
-    const event_id  = eventSnapshot.ref.getKey();
+    const stream_id = event_snapshot.ref.getParent().getKey();
+    const event_id  = event_snapshot.ref.getKey();
 
-    const ref = f.FIREBASE_APP.database().ref(`/state/${aggregate}`).child(stream_id);
+    // Fetch previous state.
+    const db = FIREBASE_APP.database();
+    const aggregate_ref = db.ref(`/state/${aggregate}`);
 
-    const eh = aggregates[aggregate]["event_handlers"];
-    const is_event_handler_defined = ( eh[event.event_name] !== undefined );
-    const event_handler =
-        (is_event_handler_defined) ? eh[event.event_name] : eh["generic"];
+    const event_handlers = aggregates[aggregate]["event_handlers"];
+    var apply;
+    if ( event_handlers[event.event_name] !== undefined ) {
+        apply = event_handlers[event.event_name];
+    } else {
+        apply = event_handlers["generic"];
+    };
 
-    var projectile = event_handler(event);
+    aggregate_ref.child(stream_id).once("value").then(
+        function(previous_state_snapshot) {
 
-    /* TODO: At one point use this to only evaluate events from the
-                point where they haven't been applied yet. */
-    projectile["latest_event_id"] = event_id;
+            var projectile = apply(event_snapshot, previous_state_snapshot);
 
-    ref.update(projectile);
+            /* TODO: At one point use this to only evaluate events from the
+                        point where they haven't been applied yet. */
+            projectile["latest_event_id"] = event_id;
+
+            aggregate_ref.child(stream_id).update(projectile);
+        }
+    );
 }
 
 // function add_user(fire_app, fields, account_type) {
@@ -421,12 +514,20 @@ module.exports = {
 };
 
 // const f = require('./admin-functions.js');
-// const p1 = f.aggregates.people.new_instance();
-// f.execute(p1, 'add_person', { first_name: "Kilgore", last_name: "Troutman"})
-// const p2 = f.aggregates.people.new_instance();
+// const p1 = f.aggregates.people.new_instance(); f.execute(p1, 'add_person', { first_name: "Kilgore", last_name: "Troutman"})
 // f.cling()
-// f.execute(p2, 'add_person', { first_name: "Jorge", last_name: "Avenfasz"})
-// f.execute({stream_id: "-LJCPft0DosnGIPgvgei", type: "people"}, 'add_email', { email: "jorge@el.com"})
-// f.execute({stream_id: "-LJCPft0DosnGIPgvgei", type: "people"}, 'add_email', { email: "jorge@nemel.com"})
-// f.execute({stream_id: "-LJCPIVTTQEiiMkeNJqG", type: "people"}, 'add_email', { email: "val@ami.com"})
+// const p2 = f.aggregates.people.new_instance(); f.execute(p2, 'add_person', { first_name: "Jorge", last_name: "Avenfasz"})
+
+// TEST NAME CHANGE
+// stream_id = "-LJFgGnFyyn9lhHwNEdd";
+// f.execute({stream_id: stream_id, type: "people"}, 'change_name', { first_name: "Jorge", last_name: "Faszven"})
+
+// TEST ADDING MULTIPLE EMAILS
+// f.execute({stream_id: stream_id, type: "people"}, 'add_email', { email: "jorge@el.com"})
+// f.execute({stream_id: stream_id, type: "people"}, 'add_email', { email: "ven@fasz.com"})
+// f.execute({stream_id: stream_id, type: "people"}, 'add_email', { email: "jorge@nemel.com"})
+
+// TEST UPDATING EMAILS
+// var event_id = "-LJFiZugy9UuXv_0I9zS"; // in this case `event_id` === `email_id`
+// f.execute({stream_id: stream_id, type: "people"}, 'update_email', { email: "val@ami.com", event_id: event_id})
 
