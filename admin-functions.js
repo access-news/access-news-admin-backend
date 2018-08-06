@@ -149,7 +149,7 @@ function cast_event_payload(o) {
     const payload_properties = Object.keys(o.payload);
 
     if (payload_properties.length !== o.required_fields.length) {
-        throw `Extraneous fields, expected: ${o.required_fields}, got: ${payload_properties}`
+        throw `Expected fields: ${o.required_fields}, got: ${payload_properties}`
     }
 
     for (var i in payload_properties) {
@@ -210,6 +210,7 @@ const apply_factory = {
        require extra checks than singular ones, for example a person's name,
        where changing it simply overwrites the previous value.
     */
+
     add_for_multi: function(o) {
         /* o =
                {
@@ -237,8 +238,36 @@ const apply_factory = {
                 };
 
                 // Return the mutated state.
-                return state;`
-        )
+                return state;
+                `)
+    },
+
+    update_for_multi: function(o) { /* See `o`'s description at `add_for_multi` */
+
+        return new Function("event_snapshot", "previous_state_snapshot",
+                `
+                const event = event_snapshot.val();
+                var   state = previous_state_snapshot.val();
+
+                state["${o.state_attribute}"][event.fields.event_id] = event["fields"]["${o.event_field}"];
+
+                return state;
+                `)
+    },
+
+    delete_for_multi: function(o) { /* See `o`'s description at `add_for_multi` */
+
+        /* o = { state_attribute: "emails" } */
+
+        return new Function("event_snapshot", "previous_state_snapshot",
+                `
+                const event = event_snapshot.val();
+                var   state = previous_state_snapshot.val();
+
+                state["${o.state_attribute}"][event.fields.event_id] = null;
+
+                return state;
+                `)
     },
 };
 
@@ -309,28 +338,16 @@ const aggregates = {
                     event_field:     "email"
                 }),
 
-            "email_updated": function(event_snapshot, previous_state_snapshot) {
+            "email_updated":
+                apply_factory.update_for_multi({
+                    state_attribute: "emails",
+                    event_field:     "email"
+                }),
 
-                const event    = event_snapshot.val();
-
-                // The previous state will be used to build the new state.
-                var state    = previous_state_snapshot.val();
-
-                state.emails[event.fields.event_id] = event.fields.email;
-
-                // Return the mutated state.
-                return state;
-            },
-
-            "email_deleted": function(event_snapshot, previous_state_snapshot) {
-
-                const event = event_snapshot.val();
-                var   state = previous_state_snapshot.val();
-
-                state.emails[event.fields.event_id] = null;
-
-                return state;
-            },
+            "email_deleted":
+                apply_factory.delete_for_multi({
+                    state_attribute: "emails"
+                }),
 
             // if no handler specified for event, use this.
             "generic": function(event_snapshot, previous_state_snapshot) {
@@ -471,8 +488,6 @@ function applicator(event_snapshot) {
                issue, but not ideal.
             */
             projectile["latest_event_id"] = event_id;
-            console.log(event_id);
-            console.log(event);
 
             aggregate_ref.child(stream_id).update(projectile);
         }
