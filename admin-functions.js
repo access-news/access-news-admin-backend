@@ -200,6 +200,48 @@ function cling() {
     );
 }
 
+// 1. Aggregate and helpers
+
+const apply_factory = {
+
+    /* Factories with "multi" in their name are for attributes (value objects
+       in DDD?), that can have multiple values simultaneously. For example,
+       a person can have multiple email addresses, phone numbers etc. These
+       require extra checks than singular ones, for example a person's name,
+       where changing it simply overwrites the previous value.
+    */
+    add_for_multi: function(o) {
+        /* o =
+               {
+                   state_attribute: "emails", // state: aggregate instance's state
+                   event_field:     "email"
+               }
+        */
+
+        return new Function("event_snapshot", "previous_state_snapshot",
+                `
+                const event    = event_snapshot.val();
+                const event_id = event_snapshot.ref.getKey();
+
+                // The previous state will be used to build the new state.
+                var state    = previous_state_snapshot.val();
+
+                // Check if any emails have been added previously
+                if (state["${o.state_attribute}"] === undefined) {
+                    state["${o.state_attribute}"] = {};
+                    state["${o.state_attribute}"][event_id] = event["fields"]["${o.event_field}"];
+                } else {
+                    var update = {};
+                    update[event_id] = event["fields"]["${o.event_field}"];
+                    Object.assign(state["${o.state_attribute}"] , update);
+                };
+
+                // Return the mutated state.
+                return state;`
+        )
+    },
+};
+
 const aggregates = {
 
     people: {
@@ -256,33 +298,16 @@ const aggregates = {
                 const event    = event_snapshot.val();
                 // The previous state will be used to build the new state.
                 var state    = previous_state_snapshot.val();
-
                 state["name"] = event.fields;
 
                 return state;
             },
 
-            "email_added": function(event_snapshot, previous_state_snapshot) {
-
-                const event    = event_snapshot.val();
-                const event_id = event_snapshot.ref.getKey();
-
-                // The previous state will be used to build the new state.
-                var state    = previous_state_snapshot.val();
-
-                // Check if any emails have been added previously
-                if (state.emails === undefined) {
-                    state["emails"] = {};
-                    state.emails[event_id] = event.fields.email;
-                } else {
-                    var update = {};
-                    update[event_id] = event.fields.email;
-                    Object.assign(state.emails, update);
-                };
-
-                // Return the mutated state.
-                return state;
-            },
+            "email_added":
+                apply_factory.add_for_multi({
+                    state_attribute: "emails",
+                    event_field:     "email"
+                }),
 
             "email_updated": function(event_snapshot, previous_state_snapshot) {
 
@@ -435,7 +460,19 @@ function applicator(event_snapshot) {
 
             /* TODO: At one point use this to only evaluate events from the
                         point where they haven't been applied yet. */
+            /* POTENTIAL BUG:
+               May not be an issue once `cling()` deployed as a cloud function
+               but just in case:
+               When Node is restarted, "latest_event_id" will become the stream's
+               **first** event_id, because for some reason the events are read
+               from newest to oldest, when reattached.
+
+               Because of `cling()`'s idempotency, this doesn't seem to be an
+               issue, but not ideal.
+            */
             projectile["latest_event_id"] = event_id;
+            console.log(event_id);
+            console.log(event);
 
             aggregate_ref.child(stream_id).update(projectile);
         }
@@ -524,7 +561,8 @@ module.exports = {
     aggregates,
     execute,
     commands,
-    cling
+    cling,
+    apply_factory
 };
 
 // const f = require('./admin-functions.js');
