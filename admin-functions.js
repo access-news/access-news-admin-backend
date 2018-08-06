@@ -233,7 +233,11 @@ const aggregates = {
                 required_fields: ['email', 'event_id'],
             },
 
-            "add_user": {}
+            "delete_email": {
+                event_name:      'email_deleted',
+                // Technically 'email' is not required, but nice to avoid an extra lookup
+                required_fields: ['email', 'event_id', 'reason']
+            },
         },
 
         /* Used by `applicator`. These are the actual `apply` functions
@@ -290,6 +294,16 @@ const aggregates = {
                 state.emails[event.fields.event_id] = event.fields.email;
 
                 // Return the mutated state.
+                return state;
+            },
+
+            "email_deleted": function(event_snapshot, previous_state_snapshot) {
+
+                const event = event_snapshot.val();
+                var   state = previous_state_snapshot.val();
+
+                state.emails[event.fields.event_id] = null;
+
                 return state;
             },
 
@@ -390,7 +404,7 @@ function execute(aggregate_instance, command, payload, callback) {
    cleaner.
 
    Also, a downside of fetching the state in `apply`, is that this
-   results in another database query.
+   needs an extra database query.
 */
 function applicator(event_snapshot) {
 
