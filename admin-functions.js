@@ -309,6 +309,22 @@ const aggregates = {
                 // Technically 'email' is not required, but nice to avoid an extra lookup
                 required_fields: ['email', 'event_id', 'reason']
             },
+
+            "add_phone_number": {
+                event_name:      'phone_number_added',
+                required_fields: ['phone_number'],
+            },
+
+            "update_phone_number": {
+                event_name:      'phone_number_updated',
+                required_fields: ['phone_number', 'event_id'],
+            },
+
+            "delete_phone_number": {
+                event_name:      'phone_number_deleted',
+                // Technically 'phone_number' is not required, but nice to avoid an extra lookup
+                required_fields: ['phone_number', 'event_id', 'reason']
+            },
         },
 
         /* Used by `applicator`. These are the actual `apply` functions
@@ -347,6 +363,23 @@ const aggregates = {
             "email_deleted":
                 apply_factory.delete_for_multi({
                     state_attribute: "emails"
+                }),
+
+            "phone_number_added":
+                apply_factory.add_for_multi({
+                    state_attribute: "phone_numbers",
+                    event_field:     "phone_number"
+                }),
+
+            "phone_number_updated":
+                apply_factory.update_for_multi({
+                    state_attribute: "phone_numbers",
+                    event_field:     "phone_number"
+                }),
+
+            "phone_number_deleted":
+                apply_factory.delete_for_multi({
+                    state_attribute: "phone_numbers"
                 }),
 
             // if no handler specified for event, use this.
