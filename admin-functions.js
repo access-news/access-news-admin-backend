@@ -18,8 +18,6 @@ function init_firebase_admin() {
     return firebase_admin;
 };
 
-const firebase_admin = init_firebase_admin();
-
 function init_firebase_client() {
 
     const firebase_client = require('firebase');
@@ -29,13 +27,11 @@ function init_firebase_client() {
     return firebase_client;
 };
 
-const firebase_client = init_firebase_client();
-
-var FIREBASE_APP = firebase_admin;
+var FIREBASE_APP = init_firebase_admin();
 
 /* ADMIN COMMANDS */
 
-/* 0. Helpers */
+/* 0. Event creation helpers */
 
 /* General structure of events:
 
@@ -77,7 +73,8 @@ function create_new_stream() {
     return FIREBASE_APP.database().ref("event_store").push().key;
 }
 
-/* Function name is misleading because it also saves events to
+/* ISSUE #2
+   Function name is misleading because it also saves events to
    `/events`. Wanted to use the `Reference.update()` transaction,
    hence the reason why didn't just create another function.
 
@@ -101,15 +98,8 @@ function append_event_to_stream(stream_id, event) {
     db.ref().update(updates);
 };
 
-// function start_new_stream_with_event(event) {
-
-//     const id_of_new_stream = create_new_stream();
-//     append_event_to_stream(id_of_new_stream, event);
-
-//     return id_of_new_stream;
-// }
-
-/* NOTE: Event fields need to be one-dimensonal (-> easier checks) */
+/* NOTE: Event fields need to be one-dimensonal (-> easier to check
+         in `cast_event_payload()` below).*/
 function create_event(o) {
 
     /*  {
@@ -200,9 +190,9 @@ function cling() {
     );
 }
 
-// 1. Aggregate and helpers
+/* 1. Aggregate and helpers */
 
-const apply_factory = {
+const apply_factories = {
 
     /* Factories with "multi" in their name are for attributes (value objects
        in DDD?), that can have multiple values simultaneously. For example,
@@ -290,7 +280,7 @@ const aggregates = {
             },
 
             "change_name": {
-                event_name: 'person_name_changed',
+                event_name:      'person_name_changed',
                 required_fields: ['first_name', 'last_name']
             },
 
@@ -325,6 +315,30 @@ const aggregates = {
                 // Technically 'phone_number' is not required, but nice to avoid an extra lookup
                 required_fields: ['phone_number', 'event_id', 'reason']
             },
+
+            /* TODO (?): "event_name" could be a template closure to allow
+                         dynamic event creation. For example, based on the
+                         "group" field, the event could be "added_to_admins",
+                         "added_to_listeners" etc.
+
+                         But then again, too much magic can be harmful. This
+                         way we know exactly that group membership has been
+                         granted.
+
+                         Also, similar commands could also be refactored
+                         (such as "add_email", "update_email", "delete_email"
+                         and friends). But the deeper we go, the more the
+                         code will loose its self documenting properties.
+            */
+            "add_to_group": {
+                event_name:      "added_to_group",
+                required_fields: ['group'] // 'user_id' omitted as it is the stream_id for now
+            },
+
+            "remove_from_group": {
+                event_name:      "removed_from_group",
+                required_fields: ['group']
+            },
         },
 
         /* Used by `applicator`. These are the actual `apply` functions
@@ -335,112 +349,141 @@ const aggregates = {
 
             /* Don't need the previous state, because this command creates a
                brand new instance, so there is nothing to mess up. */
-            "person_added": function(event_snapshot) {
-                return { "name": event_snapshot.val().fields };
-            },
+            "person_added":
+                function(event_snapshot) {
+                    return { "name": event_snapshot.val().fields };
+                },
 
-            "person_name_changed": function(event_snapshot, previous_state_snapshot) {
-                const event    = event_snapshot.val();
-                // The previous state will be used to build the new state.
-                var state    = previous_state_snapshot.val();
-                state["name"] = event.fields;
+            "person_name_changed":
+                function(event_snapshot, previous_state_snapshot) {
+                    const event    = event_snapshot.val();
+                    // The previous state will be used to build the new state.
+                    var state    = previous_state_snapshot.val();
+                    state["name"] = event.fields;
 
-                return state;
-            },
+                    return state;
+                },
 
             "email_added":
-                apply_factory.add_for_multi({
+                apply_factories.add_for_multi({
                     state_attribute: "emails",
                     event_field:     "email"
                 }),
 
             "email_updated":
-                apply_factory.update_for_multi({
+                apply_factories.update_for_multi({
                     state_attribute: "emails",
                     event_field:     "email"
                 }),
 
             "email_deleted":
-                apply_factory.delete_for_multi({
+                apply_factories.delete_for_multi({
                     state_attribute: "emails"
                 }),
 
             "phone_number_added":
-                apply_factory.add_for_multi({
+                apply_factories.add_for_multi({
                     state_attribute: "phone_numbers",
                     event_field:     "phone_number"
                 }),
 
             "phone_number_updated":
-                apply_factory.update_for_multi({
+                apply_factories.update_for_multi({
                     state_attribute: "phone_numbers",
                     event_field:     "phone_number"
                 }),
 
             "phone_number_deleted":
-                apply_factory.delete_for_multi({
+                apply_factories.delete_for_multi({
                     state_attribute: "phone_numbers"
                 }),
 
-            // if no handler specified for event, use this.
-            "generic": function(event_snapshot, previous_state_snapshot) {
-                var state = previous_state_snapshot.val();
-                return Object.assign(state, event_snapshot.val().fields);
-            },
+            "added_to_group":
+                /* The `apply_factories.*_for_multi()` functions are not appropriate
+                   here, because there aren't many groups and these could be just
+                   added as a list (which is tricky with Firebase's Realtime DB).
+
+                   It could be that the same phone number belong to multiple
+                   people, but using a `push()` ID they are unique values that can
+                   be traced back to individuals.
+
+                   On the other hand, a projection can be built to track how many
+                   people are using the same contact details (i.e., same address,
+                   same phone number, email, etc.).
+
+                   There may be a pattern emerging later, but leaving this as is
+                   until then.
+                */
+                function(event_snapshot, previous_state_snapshot) {
+
+                    // The previous state will be used to build the new state.
+                    var state   = previous_state_snapshot.val();
+                    const event = event_snapshot.val();
+
+                    if (state["groups"] === undefined) {
+                        state["groups"] = {};
+                    };
+
+                    const group_name = event["fields"]["group"];
+                    state["groups"][group_name] = true;
+
+                    // Return the mutated state.
+                    return state;
+                },
+
+            "removed_from_group":
+                function(event_snapshot, previous_state_snapshot) {
+
+                    var state   = previous_state_snapshot.val();
+                    const event = event_snapshot.val();
+
+                    /* Just as in "added_to_group", membership is not checked here.
+                       That should be done before we get here. */
+                    const group_name = event["fields"]["group"];
+                    state["groups"][group_name] = null;
+
+                    return state;
+                },
         }
     },
 };
 
-const commands = {
+/* aggregate_instance = object holding current state; ignored for new stream
 
-//  aggregate
-    people: {
+   p =  {
+           (REQUIRED) command: string_from_aggregates_commands,
+           (REQUIRED) payload: object_conforming_to_command_in_aggregates,
+                      callback: function // no use for it so far
+        }
+*/
+function execute(aggregate_instance, p) {
 
-        /* add_person
 
-            checking for the duplicate entries when trying to create a new one
-            will be responsibility of the front end client (when it is ready...).
-            there can be users with the same name, etc. therefore in the
-            beginning it will be easer to use humans to decide if there is a
-            genuine duplicate or not.
-
-            whenever this command is called, the deliberation process should
-            already be over and it means that someone chose to allow the creation
-            of a new user.
-        */
+    if (p.callback) {
+        p.callback();
     }
-}
 
-//               ------ state -----
-function execute(aggregate_instance, command, payload, callback) {
-//               {} or null if new
-//               or plainly ignored
+    /* TODO: add some extra checks on what commands should trigger
+             the creation of a new stream. There should only be one
+             per aggregate.
 
-    /* required parameters:
-       + aggregate_instance
-       + command
-       + payload
+             Or push this to the UI/API as well?
     */
-
-    if (callback) {
-        callback();
-    }
-
     const is_stream_new = (aggregate_instance.stream_id === undefined);
     const stream_id = (is_stream_new) ? create_new_stream() : aggregate_instance.stream_id;
 
     const aggregate_type = aggregate_instance.type;
-    const c = aggregates[aggregate_type]["commands"][command];
+    const c = aggregates[aggregate_type]["commands"][p.command];
 
     if (c === undefined) {
-        throw `command "${command}" does not exist`;
+        throw `command "${p.command}" does not exist`;
     }
 
     const fields =
         cast_event_payload(
             {
                 "required_fields": c.required_fields,
-                "payload":         payload
+                "payload":         p.payload
             }
         );
 
@@ -500,7 +543,8 @@ function applicator(event_snapshot) {
     if ( event_handlers[event.event_name] !== undefined ) {
         apply = event_handlers[event.event_name];
     } else {
-        apply = event_handlers["generic"];
+        const event_handler_keys = Object.keys(event_handlers);
+        throw `No such event handler. Choose from the list: ${event_handler_keys}`
     };
 
     aggregate_ref.child(stream_id).once("value").then(
@@ -510,7 +554,7 @@ function applicator(event_snapshot) {
 
             /* TODO: At one point use this to only evaluate events from the
                         point where they haven't been applied yet. */
-            /* POTENTIAL BUG:
+            /* ISSUE #1
                May not be an issue once `cling()` deployed as a cloud function
                but just in case:
                When Node is restarted, "latest_event_id" will become the stream's
@@ -527,20 +571,78 @@ function applicator(event_snapshot) {
     );
 }
 
-// function add_user(fire_app, fields, account_type) {
+/* The rationale behind creating this collection is twofold:
 
-//     /* `person` object:
-//        ================
-//         {
-//             name: {
-//                 first: "Bala",
-//                 last:  "Bab"
-//             },
-//             email: "ema@il.com"
-//         }
+     + TECHNICAL: Firebase commands are asynchronous, and they return promises,
+       thus in order to do something on success, the actions need to be wrapped
+       in it (i.e., in `then()` for example). So in order to save the resulting
+       "user_id", the database commands need to be run in the callback.
 
-//         `account_type`: [ "admin" | "reader" | "listener" ]
-//     */
+     + AESTHETICAL (not the right word, but working on it): these functions
+       would be called by end users (admins mostly) and would emit multiple
+       events. (Whereas `execute()` and `apply()` work on one command and event
+       respectively.)
+*/
+const public_commands = {
+
+    /* person =
+       {
+           (REQUIRED) first_name: "",
+           (REQUIRED) last_name:  "",
+                      username:   "", // "first_name" + "last_name" by default
+           (REQUIRED) user_id:    "",
+           (REQUIRED) email:      "",
+                      address:    "",
+                      phone_number: "",
+           (REQUIRED) account_type: [ "admin" | "reader" | "listener" ],
+       }
+    */
+    add_user: function(person) {
+
+        if (person.username === undefined) {
+            person["username"] = `${person.first_name} ${person.last_name}`;
+        }
+
+        FIREBASE_APP.auth().createUser(
+            {
+                "disabled":     false,
+                "displayName":  person.username,
+                "email":        person.email,
+                "phoneNumber":  person.phone_number,
+                /* A person can be member to multiple groups, but using the same
+                   "stream_id"; they cannot be added multiple times anyway and
+                   easier to check for presence.*/
+                // TODO: Is the above a good idea?...
+                /* ANSWER: No, but with Firebase, there can be one user with the
+                           same email, therefore group membership is an artificial
+                           construct, and authorization will be implemented using
+                           security rules.
+                */
+                "uid":          person.user_id
+            }
+        ).then(
+            function(user_record) {
+
+                const person = aggregates.people.new_instance();
+
+                const commands =
+                    [
+                        {
+                            command: "add_person",
+                            payload: {
+                                "first_name": person.first_name,
+                                "last_name":  person.last_name
+                            }
+                        },
+                        {
+                            command: "add_email",
+                            payload: { "email": person.email }
+                        }
+                    ]
+            }
+        );
+    }
+}
 
 //     firebase_admin.auth().createUser({ email: person.email }).then(function(userRecord) {
 
@@ -600,17 +702,16 @@ function applicator(event_snapshot) {
 // };
 
 module.exports = {
-    firebase_admin,
-    firebase_client,
+    init_firebase_admin,
+    init_firebase_client,
     create_new_stream,
     append_event_to_stream,
     EVENT_VERSION,
     FIREBASE_APP,
     aggregates,
     execute,
-    commands,
     cling,
-    apply_factory
+    apply_factories
 };
 
 // const f = require('./admin-functions.js');
