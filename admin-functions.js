@@ -156,40 +156,6 @@ function cast_event_payload(o) {
     return fields;
 }
 
-/* Purpose: (1) Attach a listener to 'event_store', that will
-            (2) attach a listener to each stream_id to listen to
-                new events.
-
-         When a new stream is started, (1) will attach a listener
-         to it, listening to new events within the stream. When a
-         new event comes in, it will be `apply`ed (i.e., projections
-         updated).
-
-         event_store
-             -LJ16Q8UiM6eJWyesqGO (stream) -> attach new listener to new child
-                 -LJ16Q8XDTfk0Z_r14EA (event) -> listener projects the data
-                 -LJ282RXV-TCLxxOh-xS (event)
-             -LJ2F09G2M_YWB78BNo_ (stream)
-                 -LJ2F09KfLTSKOXf7vlN (event)
-                 -LJ2NVlbYvz9ptVpiCkj (event)
-                 -LJ2OL1NZEQBpiA_mPDh (event)
-                 -LJ2TkQjSfhV39SXWoDh (event)
-*/
-function cling() {
-
-    const event_store = FIREBASE_APP.database().ref('event_store');
-
-    event_store.on(
-        'child_added',
-        function(stream) {
-            event_store.child(stream.key).on(
-                'child_added',
-                applicator
-            );
-        }
-    );
-}
-
 /* 1. Aggregate and helpers */
 
 const apply_factories = {
@@ -499,6 +465,40 @@ function execute(aggregate_instance, p) {
         );
 
     append_event_to_stream(stream_id, event);
+}
+
+/* Purpose: (1) Attach a listener to 'event_store', that will
+            (2) attach a listener to each stream_id to listen to
+                new events.
+
+         When a new stream is started, (1) will attach a listener
+         to it, listening to new events within the stream. When a
+         new event comes in, it will be `apply`ed (i.e., projections
+         updated).
+
+         event_store
+             -LJ16Q8UiM6eJWyesqGO (stream) -> attach new listener to new child
+                 -LJ16Q8XDTfk0Z_r14EA (event) -> listener projects the data
+                 -LJ282RXV-TCLxxOh-xS (event)
+             -LJ2F09G2M_YWB78BNo_ (stream)
+                 -LJ2F09KfLTSKOXf7vlN (event)
+                 -LJ2NVlbYvz9ptVpiCkj (event)
+                 -LJ2OL1NZEQBpiA_mPDh (event)
+                 -LJ2TkQjSfhV39SXWoDh (event)
+*/
+function cling() {
+
+    const event_store = FIREBASE_APP.database().ref('event_store');
+
+    event_store.on(
+        'child_added',
+        function(stream) {
+            event_store.child(stream.key).on(
+                'child_added',
+                applicator
+            );
+        }
+    );
 }
 
 /* In other Event Sourcing implementations, the `apply` function
