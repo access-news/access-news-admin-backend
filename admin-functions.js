@@ -175,13 +175,13 @@ const apply_factories = {
                }
         */
 
-        return new Function("event_snapshot", "previous_state_snapshot",
+        return new Function("event_snapshot", "instance_state_object",
                 `
                 const event    = event_snapshot.val();
                 const event_id = event_snapshot.ref.getKey();
 
                 // The previous state will be used to build the new state.
-                var state    = previous_state_snapshot.val();
+                var state    = instance_state_object;
 
                 // Check if any emails have been added previously
                 if (state["${o.state_attribute}"] === undefined) {
@@ -200,10 +200,10 @@ const apply_factories = {
 
     update_for_multi: function(o) { /* See `o`'s description at `add_for_multi` */
 
-        return new Function("event_snapshot", "previous_state_snapshot",
+        return new Function("event_snapshot", "instance_state_object",
                 `
                 const event = event_snapshot.val();
-                var   state = previous_state_snapshot.val();
+                var   state = instance_state_object;
 
                 state["${o.state_attribute}"][event.fields.event_id] = event["fields"]["${o.event_field}"];
 
@@ -215,10 +215,10 @@ const apply_factories = {
 
         /* o = { state_attribute: "emails" } */
 
-        return new Function("event_snapshot", "previous_state_snapshot",
+        return new Function("event_snapshot", "instance_state_object",
                 `
                 const event = event_snapshot.val();
-                var   state = previous_state_snapshot.val();
+                var   state = instance_state_object;
 
                 state["${o.state_attribute}"][event.fields.event_id] = null;
 
@@ -321,10 +321,10 @@ const aggregates = {
                 },
 
             "person_name_changed":
-                function(event_snapshot, previous_state_snapshot) {
+                function(event_snapshot, instance_state_object) {
                     const event    = event_snapshot.val();
                     // The previous state will be used to build the new state.
-                    var state    = previous_state_snapshot.val();
+                    var state    = instance_state_object;
                     state["name"] = event.fields;
 
                     return state;
@@ -380,10 +380,10 @@ const aggregates = {
                    There may be a pattern emerging later, but leaving this as is
                    until then.
                 */
-                function(event_snapshot, previous_state_snapshot) {
+                function(event_snapshot, instance_state_object) {
 
                     // The previous state will be used to build the new state.
-                    var state   = previous_state_snapshot.val();
+                    var state   = instance_state_object;
                     const event = event_snapshot.val();
 
                     if (state["groups"] === undefined) {
@@ -398,9 +398,9 @@ const aggregates = {
                 },
 
             "removed_from_group":
-                function(event_snapshot, previous_state_snapshot) {
+                function(event_snapshot, instance_state_object) {
 
-                    var state   = previous_state_snapshot.val();
+                    var state   = instance_state_object;
                     const event = event_snapshot.val();
 
                     /* Just as in "added_to_group", membership is not checked here.
@@ -467,6 +467,115 @@ function execute(aggregate_instance, p) {
     append_event_to_stream(stream_id, event);
 }
 
+var state_store = {};
+
+function build_next_state(event_snapshot) {
+
+    const event = event_snapshot.val();
+    const aggregate = event.aggregate;
+    const stream_id = event_snapshot.ref.getParent().getKey();
+
+    const event_handlers = aggregates[aggregate]["event_handlers"];
+
+    var apply;
+    if ( event_handlers[event.event_name] !== undefined ) {
+        apply = event_handlers[event.event_name];
+    } else {
+        const event_handler_keys = Object.keys(event_handlers);
+        throw `No such event handler. Choose from the list: ${event_handler_keys}`
+    };
+
+    if (state_store[aggregate] === undefined) {
+        state_store[aggregate] = {};
+    }
+
+    if (state_store[aggregate][stream_id] === undefined) {
+        state_store[aggregate][stream_id] = {};
+    }
+
+    const aggregate_instance_state_object = state_store[aggregate][stream_id];
+
+    var projectile = apply(event_snapshot, aggregate_instance_state_object);
+    projectile["timestamp"] = event.timestamp;
+
+    Object.assign(aggregate_instance_state_object, projectile);
+    console.log(state_store);
+
+    FIREBASE_APP.database().ref(`/state/${aggregate}`).child(stream_id).update(aggregate_instance_state_object);
+}
+
+function rebuild_state() {
+
+    // Fetch previous state.
+    const db = FIREBASE_APP.database();
+
+    db.ref("/state").once("value").then(
+        function(state_snapshot){
+
+            state_store =
+                (state_snapshot.val() === null) ? {} : state_snapshot.val();
+        }
+    ).then(
+
+        /* "initial_state" refers to the state after a server restart.
+           Used by `applicator()` to replay events in the correct order
+           by comparing timestamps: if the about to be applied event
+           is older, it is applied before the "fetch state" phase
+           (i.e., `ref('/state').once(...)`, see issue #1) and returns
+           early. */
+        function() {
+
+            db.ref('event_store').once('value').then(
+
+                function(snapshot){
+
+                    const store = snapshot.val();
+                    const stream_ids = Object.keys(store);
+
+                    stream_ids.forEach(
+                        function(stream_id) {
+
+                            const stream = store[stream_id];
+                            const event_ids = Object.keys(stream);
+
+                            event_ids.forEach(
+                                function(event_id) {
+
+                                    // const event = stream[event_id];
+                                    const event_snapshot = snapshot.child(stream_id).child(event_id);
+
+                                    build_next_state(event_snapshot);
+                                    // const aggregate = event["aggregate"];
+
+                                    // const previous_instance_state_snapshot =
+                                    //     initial_state_snapshot.child(aggregate).child(stream_id);
+
+                                    // const previous_instance_state =
+                                    //     previous_instance_state_snapshot.val();
+
+                                    // const initial_state_timestamp =
+                                    //     initial_state_snapshot.val()[aggregate][stream_id]["timestamp"];
+
+                                    // if (event.timestamp <= initial_state_timestamp) {
+                                    //     const b = (event.timestamp <= initial_state_timestamp);
+                                    //     console.log(`${event_id} - ${event.timestamp} < ${initial_state_timestamp} (${b}) do nothing` );
+                                    //     return;
+                                    // } else {
+                                    //     const b = (event.timestamp <= initial_state_timestamp);
+                                    //     console.log(`${event_id} - ${event.timestamp} < ${initial_state_timestamp} (${b}) replay event and return` );
+                                    //     build_next_state(instance_state_object);
+                                    //     return;
+                                    // }
+                                }
+                            );
+                        }
+                    );
+                }
+            )
+        }
+    )
+}
+
 /* Purpose: (1) Attach a listener to 'event_store', that will
             (2) attach a listener to each stream_id to listen to
                 new events.
@@ -488,88 +597,71 @@ function execute(aggregate_instance, p) {
 */
 function cling() {
 
-    const event_store = FIREBASE_APP.database().ref('event_store');
 
-    event_store.on(
-        'child_added',
-        function(stream) {
-            event_store.child(stream.key).on(
-                'child_added',
-                applicator
-            );
+//             const event_store = db.ref('event_store');
+
+//             event_store.on(
+//                 'child_added',
+//                 function(stream) {
+//                     event_store.child(stream.key).on(
+//                         'child_added',
+//                         /* In other Event Sourcing implementations, the `apply` function
+//                         has 2 arguments:
+
+//                             + the previous state and
+//                             + an event (to update the previous state).
+
+//                         Due to the usage of Firebase's Realtime Databse, this function
+//                         is only the callback of the listeners attached to new events,
+//                         that only takes one argument of DataSnapshot type.
+
+//                         Therefore, we fetch the previous state from
+//                         `/state/(aggregate)/(stream_id).
+
+//                         --------------------------------------------------------------
+
+//                         ANOTHER APPROACH would be to include the previous state of the
+//                         specific aggregate attribute (eg. people's email) in the COMMANDS
+//                         so that it would be readily avaiable on update, but this seems
+//                         cleaner.
+
+//                         Also, a downside of fetching the state in `apply`, is that this
+//                         needs an extra database query.
+//                         */
+//                         function applicator(event_snapshot) {
+
+//                             // ALWAYS make sure applying events are idempotent.
+//                             // ================================================
+
+//                             const event = event_snapshot.val();
+//                             const aggregate = event.aggregate;
+//                             const stream_id = event_snapshot.ref.getParent().getKey();
+//                             const event_id  = event_snapshot.ref.getKey();
+
+//                             const event_handlers = aggregates[aggregate]["event_handlers"];
+
+//                             var apply;
+//                             if ( event_handlers[event.event_name] !== undefined ) {
+//                                 apply = event_handlers[event.event_name];
+//                             } else {
+//                                 const event_handler_keys = Object.keys(event_handlers);
+//                                 throw `No such event handler. Choose from the list: ${event_handler_keys}`
+//                             };
+
+//                             /* Replay events in the right order in case of a server restart. Because of
+//                                issue #1, the events get passed in backwards order into the fetch state
+//                                phase below, when `on()` listeners are first activated.  */
+
+//                             // PULL TO TOP FOR CLOUD FUNCTIONS (i.e., between the last `on()` and on top of `applicator()`
+//                             console.log(`${event_id} - ${event.timestamp} < ${initial_state_timestamp} new event`);
+//                             db.ref(`/state/${aggregate}`).child(stream_id).once("value").then(build_next_state);
+//                         }
+//                     );
+//                 }
+//             );
         }
-    );
-}
-
-/* In other Event Sourcing implementations, the `apply` function
-   has 2 arguments:
-
-     + the previous state and
-     + an event (to update the previous state).
-
-   Due to the usage of Firebase's Realtime Databse, this function
-   is only the callback of the listeners attached to new events,
-   that only takes one argument of DataSnapshot type.
-
-   Therefore, we fetch the previous state from
-   `/state/(aggregate)/(stream_id).
-
-   --------------------------------------------------------------
-
-   ANOTHER APPROACH would be to include the previous state of the
-   specific aggregate attribute (eg. people's email) in the COMMANDS
-   so that it would be readily avaiable on update, but this seems
-   cleaner.
-
-   Also, a downside of fetching the state in `apply`, is that this
-   needs an extra database query.
-*/
-function applicator(event_snapshot) {
-
-    // ALWAYS make sure applying events are idempotent.
-    // ================================================
-
-    const event = event_snapshot.val();
-    const aggregate = event.aggregate;
-    const stream_id = event_snapshot.ref.getParent().getKey();
-    const event_id  = event_snapshot.ref.getKey();
-
-    // Fetch previous state.
-    const db = FIREBASE_APP.database();
-    const aggregate_ref = db.ref(`/state/${aggregate}`);
-
-    const event_handlers = aggregates[aggregate]["event_handlers"];
-    var apply;
-    if ( event_handlers[event.event_name] !== undefined ) {
-        apply = event_handlers[event.event_name];
-    } else {
-        const event_handler_keys = Object.keys(event_handlers);
-        throw `No such event handler. Choose from the list: ${event_handler_keys}`
-    };
-
-    aggregate_ref.child(stream_id).once("value").then(
-        function(previous_state_snapshot) {
-
-            var projectile = apply(event_snapshot, previous_state_snapshot);
-
-            /* TODO: At one point use this to only evaluate events from the
-                        point where they haven't been applied yet. */
-            /* ISSUE #1
-               May not be an issue once `cling()` deployed as a cloud function
-               but just in case:
-               When Node is restarted, "latest_event_id" will become the stream's
-               **first** event_id, because for some reason the events are read
-               from newest to oldest, when reattached.
-
-               Because of `cling()`'s idempotency, this doesn't seem to be an
-               issue, but not ideal.
-            */
-            projectile["latest_event_id"] = event_id;
-
-            aggregate_ref.child(stream_id).update(projectile);
-        }
-    );
-}
+    // );
+// }
 
 /* The rationale behind creating this collection is twofold:
 
@@ -711,7 +803,9 @@ module.exports = {
     aggregates,
     execute,
     cling,
-    apply_factories
+    state_store,
+    apply_factories,
+    rebuild_state
 };
 
 // const f = require('./admin-functions.js');
