@@ -467,47 +467,7 @@ function execute(aggregate_instance, p) {
     append_event_to_stream(stream_id, event);
 }
 
-var state_store =
-    {
-        get current() {
-            return this;
-        }
-    };
-
-function build_next_state(event_snapshot) {
-
-    const event = event_snapshot.val();
-    const aggregate = event.aggregate;
-    const stream_id = event_snapshot.ref.getParent().getKey();
-
-    const event_handlers = aggregates[aggregate]["event_handlers"];
-
-    var apply;
-    if ( event_handlers[event.event_name] !== undefined ) {
-        apply = event_handlers[event.event_name];
-    } else {
-        const event_handler_keys = Object.keys(event_handlers);
-        throw `No such event handler. Choose from the list: ${event_handler_keys}`
-    };
-
-    if (state_store[aggregate] === undefined) {
-        state_store[aggregate] = {};
-    }
-
-    if (state_store[aggregate][stream_id] === undefined) {
-        state_store[aggregate][stream_id] = {};
-    }
-
-    const aggregate_instance_state_object = state_store[aggregate][stream_id];
-
-    var projectile = apply(event_snapshot, aggregate_instance_state_object);
-    projectile["timestamp"] = event.timestamp;
-
-    Object.assign(aggregate_instance_state_object, projectile);
-    console.log(state_store);
-
-    FIREBASE_APP.database().ref(`/state/${aggregate}`).child(stream_id).update(aggregate_instance_state_object);
-}
+var state_store = {};
 
 function rebuild_state() {
 
@@ -548,31 +508,49 @@ function rebuild_state() {
                             event_ids.forEach(
                                 function(event_id) {
 
-                                    // const event = stream[event_id];
+                                    // const stream_id = event_snapshot.ref.getParent().getKey();
+
                                     const event_snapshot = snapshot.child(stream_id).child(event_id);
+                                    const event = event_snapshot.val();
 
-                                    build_next_state(event_snapshot);
-                                    // const aggregate = event["aggregate"];
+                                    const aggregate = event.aggregate;
 
-                                    // const previous_instance_state_snapshot =
-                                    //     initial_state_snapshot.child(aggregate).child(stream_id);
+                                    /* Get the `apply` function that should be
+                                       used with the current event. */
+                                    const event_handlers = aggregates[aggregate]["event_handlers"];
 
-                                    // const previous_instance_state =
-                                    //     previous_instance_state_snapshot.val();
+                                    var apply;
+                                    if ( event_handlers[event.event_name] !== undefined ) {
+                                        apply = event_handlers[event.event_name];
+                                    } else {
+                                        const event_handler_keys = Object.keys(event_handlers);
+                                        throw `No such event handler. Choose from the list: ${event_handler_keys}`
+                                    };
+                                    /* ===================================== */
 
-                                    // const initial_state_timestamp =
-                                    //     initial_state_snapshot.val()[aggregate][stream_id]["timestamp"];
+                                    if (state_store[aggregate] === undefined) {
+                                        state_store[aggregate] = {};
+                                    }
 
-                                    // if (event.timestamp <= initial_state_timestamp) {
-                                    //     const b = (event.timestamp <= initial_state_timestamp);
-                                    //     console.log(`${event_id} - ${event.timestamp} < ${initial_state_timestamp} (${b}) do nothing` );
-                                    //     return;
-                                    // } else {
-                                    //     const b = (event.timestamp <= initial_state_timestamp);
-                                    //     console.log(`${event_id} - ${event.timestamp} < ${initial_state_timestamp} (${b}) replay event and return` );
-                                    //     build_next_state(instance_state_object);
-                                    //     return;
-                                    // }
+                                    if (state_store[aggregate][stream_id] === undefined) {
+                                        state_store[aggregate][stream_id] = { timestamp: 0};
+                                    }
+
+                                    const instance_previous_state  = state_store[aggregate][stream_id];
+                                    const previous_state_timestamp = instance_previous_state.timestamp;
+
+                                    /* TEST: `cling()` not invoked, add events, and start */
+                                    if (event.timestamp <= previous_state_timestamp) {
+                                        console.log(`${event_id} do nothing` );
+                                    } else {
+                                        console.log(`${event_id} replay event and return` );
+
+                                        var projectile = apply(event_snapshot, instance_previous_state);
+                                        projectile["timestamp"] = event.timestamp;
+
+                                        Object.assign(instance_previous_state, projectile);
+                                        FIREBASE_APP.database().ref(`/state/${aggregate}`).child(stream_id).update(instance_previous_state);
+                                    }
                                 }
                             );
                         }
