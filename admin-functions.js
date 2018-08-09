@@ -518,7 +518,9 @@ function rebuild_state() {
         function(state_snapshot){
 
             state_store =
-                (state_snapshot.val() === null) ? state_store : state_snapshot.val();
+                (state_snapshot.val() === null)
+                ? state_store 
+                : Object.assign(state_store, state_snapshot.val())
         }
     ).then(
 
