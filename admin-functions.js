@@ -469,7 +469,28 @@ function execute(aggregate_instance, p) {
 
 var state_store = {};
 
-function rebuild_state() {
+/* Purpose: (0) Rebuild in-memory ("state_store") and "/state" DB state
+                on server restart.
+            (1) Attach a listener to 'event_store', that will
+            (2) attach a listener to each stream_id to listen to
+                new events.
+
+         When a new stream is started, (1) will attach a listener
+         to it, listening to new events within the stream. When a
+         new event comes in, it will be `apply`ed (i.e., projections
+         updated).
+
+         event_store
+             -LJ16Q8UiM6eJWyesqGO (stream) -> attach new listener to new child
+                 -LJ16Q8XDTfk0Z_r14EA (event) -> listener projects the data
+                 -LJ282RXV-TCLxxOh-xS (event)
+             -LJ2F09G2M_YWB78BNo_ (stream)
+                 -LJ2F09KfLTSKOXf7vlN (event)
+                 -LJ2NVlbYvz9ptVpiCkj (event)
+                 -LJ2OL1NZEQBpiA_mPDh (event)
+                 -LJ2TkQjSfhV39SXWoDh (event)
+*/
+function cling() {
 
     // Fetch previous state.
     const db = FIREBASE_APP.database();
@@ -492,161 +513,67 @@ function rebuild_state() {
            early. */
         function() {
 
-            db.ref('event_store').once('value').then(
+            const event_store = db.ref('event_store')
 
-                function(snapshot){
+                event_store.on(
+                'child_added',
+                function(stream) {
+                    event_store.child(stream.key).on(
+                        'child_added',
 
-                    const store = snapshot.val();
-                    const stream_ids = Object.keys(store);
+                        function(event_snapshot){
 
-                    stream_ids.forEach(
-                        function(stream_id) {
+                            const stream_id = event_snapshot.ref.getParent().getKey();
+                            const event_id = event_snapshot.ref.getKey();
 
-                            const stream = store[stream_id];
-                            const event_ids = Object.keys(stream);
+                            // const event_snapshot = event_snapshot.child(stream_id).child(event_id);
+                            const event = event_snapshot.val();
 
-                            event_ids.forEach(
-                                function(event_id) {
+                            const aggregate = event.aggregate;
 
-                                    // const stream_id = event_snapshot.ref.getParent().getKey();
+                            /* Get the `apply` function that should be
+                                used with the current event. */
+                            const event_handlers = aggregates[aggregate]["event_handlers"];
 
-                                    const event_snapshot = snapshot.child(stream_id).child(event_id);
-                                    const event = event_snapshot.val();
+                            var apply;
+                            if ( event_handlers[event.event_name] !== undefined ) {
+                                apply = event_handlers[event.event_name];
+                            } else {
+                                const event_handler_keys = Object.keys(event_handlers);
+                                throw `No such event handler. Choose from the list: ${event_handler_keys}`
+                            };
+                            /* ===================================== */
 
-                                    const aggregate = event.aggregate;
+                            if (state_store[aggregate] === undefined) {
+                                state_store[aggregate] = {};
+                            }
 
-                                    /* Get the `apply` function that should be
-                                       used with the current event. */
-                                    const event_handlers = aggregates[aggregate]["event_handlers"];
+                            if (state_store[aggregate][stream_id] === undefined) {
+                                state_store[aggregate][stream_id] = { timestamp: 0};
+                            }
 
-                                    var apply;
-                                    if ( event_handlers[event.event_name] !== undefined ) {
-                                        apply = event_handlers[event.event_name];
-                                    } else {
-                                        const event_handler_keys = Object.keys(event_handlers);
-                                        throw `No such event handler. Choose from the list: ${event_handler_keys}`
-                                    };
-                                    /* ===================================== */
+                            const instance_previous_state  = state_store[aggregate][stream_id];
+                            const previous_state_timestamp = instance_previous_state.timestamp;
 
-                                    if (state_store[aggregate] === undefined) {
-                                        state_store[aggregate] = {};
-                                    }
+                            /* TEST: `cling()` not invoked, add events, and start */
+                            if (event.timestamp <= previous_state_timestamp) {
+                                console.log(`${event_id} do nothing` );
+                            } else {
+                                console.log(`${event_id} replay event and return` );
 
-                                    if (state_store[aggregate][stream_id] === undefined) {
-                                        state_store[aggregate][stream_id] = { timestamp: 0};
-                                    }
+                                var projectile = apply(event_snapshot, instance_previous_state);
+                                projectile["timestamp"] = event.timestamp;
 
-                                    const instance_previous_state  = state_store[aggregate][stream_id];
-                                    const previous_state_timestamp = instance_previous_state.timestamp;
-
-                                    /* TEST: `cling()` not invoked, add events, and start */
-                                    if (event.timestamp <= previous_state_timestamp) {
-                                        console.log(`${event_id} do nothing` );
-                                    } else {
-                                        console.log(`${event_id} replay event and return` );
-
-                                        var projectile = apply(event_snapshot, instance_previous_state);
-                                        projectile["timestamp"] = event.timestamp;
-
-                                        Object.assign(instance_previous_state, projectile);
-                                        FIREBASE_APP.database().ref(`/state/${aggregate}`).child(stream_id).update(instance_previous_state);
-                                    }
-                                }
-                            );
+                                Object.assign(instance_previous_state, projectile);
+                                FIREBASE_APP.database().ref(`/state/${aggregate}`).child(stream_id).update(instance_previous_state);
+                            }
                         }
                     );
                 }
-            )
+            );
         }
     )
 }
-
-/* Purpose: (1) Attach a listener to 'event_store', that will
-            (2) attach a listener to each stream_id to listen to
-                new events.
-
-         When a new stream is started, (1) will attach a listener
-         to it, listening to new events within the stream. When a
-         new event comes in, it will be `apply`ed (i.e., projections
-         updated).
-
-         event_store
-             -LJ16Q8UiM6eJWyesqGO (stream) -> attach new listener to new child
-                 -LJ16Q8XDTfk0Z_r14EA (event) -> listener projects the data
-                 -LJ282RXV-TCLxxOh-xS (event)
-             -LJ2F09G2M_YWB78BNo_ (stream)
-                 -LJ2F09KfLTSKOXf7vlN (event)
-                 -LJ2NVlbYvz9ptVpiCkj (event)
-                 -LJ2OL1NZEQBpiA_mPDh (event)
-                 -LJ2TkQjSfhV39SXWoDh (event)
-*/
-function cling() {
-
-
-//             const event_store = db.ref('event_store');
-
-//             event_store.on(
-//                 'child_added',
-//                 function(stream) {
-//                     event_store.child(stream.key).on(
-//                         'child_added',
-//                         /* In other Event Sourcing implementations, the `apply` function
-//                         has 2 arguments:
-
-//                             + the previous state and
-//                             + an event (to update the previous state).
-
-//                         Due to the usage of Firebase's Realtime Databse, this function
-//                         is only the callback of the listeners attached to new events,
-//                         that only takes one argument of DataSnapshot type.
-
-//                         Therefore, we fetch the previous state from
-//                         `/state/(aggregate)/(stream_id).
-
-//                         --------------------------------------------------------------
-
-//                         ANOTHER APPROACH would be to include the previous state of the
-//                         specific aggregate attribute (eg. people's email) in the COMMANDS
-//                         so that it would be readily avaiable on update, but this seems
-//                         cleaner.
-
-//                         Also, a downside of fetching the state in `apply`, is that this
-//                         needs an extra database query.
-//                         */
-//                         function applicator(event_snapshot) {
-
-//                             // ALWAYS make sure applying events are idempotent.
-//                             // ================================================
-
-//                             const event = event_snapshot.val();
-//                             const aggregate = event.aggregate;
-//                             const stream_id = event_snapshot.ref.getParent().getKey();
-//                             const event_id  = event_snapshot.ref.getKey();
-
-//                             const event_handlers = aggregates[aggregate]["event_handlers"];
-
-//                             var apply;
-//                             if ( event_handlers[event.event_name] !== undefined ) {
-//                                 apply = event_handlers[event.event_name];
-//                             } else {
-//                                 const event_handler_keys = Object.keys(event_handlers);
-//                                 throw `No such event handler. Choose from the list: ${event_handler_keys}`
-//                             };
-
-//                             /* Replay events in the right order in case of a server restart. Because of
-//                                issue #1, the events get passed in backwards order into the fetch state
-//                                phase below, when `on()` listeners are first activated.  */
-
-//                             // PULL TO TOP FOR CLOUD FUNCTIONS (i.e., between the last `on()` and on top of `applicator()`
-//                             console.log(`${event_id} - ${event.timestamp} < ${initial_state_timestamp} new event`);
-//                             db.ref(`/state/${aggregate}`).child(stream_id).once("value").then(build_next_state);
-//                         }
-//                     );
-//                 }
-//             );
-        }
-    // );
-// }
 
 /* The rationale behind creating this collection is twofold:
 
@@ -790,7 +717,6 @@ module.exports = {
     cling,
     state_store,
     apply_factories,
-    rebuild_state
 };
 
 // const f = require('./admin-functions.js');
