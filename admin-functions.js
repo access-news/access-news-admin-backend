@@ -103,7 +103,7 @@ function append_event_to_stream(stream_id, event) {
 function create_event(o) {
 
     /*  {
-            "aggregate_type":  aggregate_type,
+            "aggregate":  aggregate,
             "event_name": c.event_name,
             "fields":     fields,
             "timestamp":  FIREBASE_APP.database.ServerValue.TIMESTAMP,
@@ -115,7 +115,7 @@ function create_event(o) {
     */
 
     var event = {
-        "aggregate":  o.aggregate_type,
+        "aggregate":  o.aggregate,
         "event_name": o.event_name,
         "fields":     o.fields,
         "timestamp":  FIREBASE_APP.database.ServerValue.TIMESTAMP,
@@ -231,12 +231,100 @@ const aggregates = {
 
     people: {
 
-        new_instance: function() {
+        /* `new_instance()` only creates the initial state object to be fed
+           to `execute()`. The latter will generate an EVENT in turn, saves
+           it to the EVENT_STORE. This will trigger the appropriate `apply()`
+           function, corresponding to the EVENT TYPE, generate the NEXT STATE,
+           and update the STATE_STORE (both in DB and in memory).
 
-            function Person() {
-                this.type = 'people';
-            }
-            return new Person();
+           (The "current_state" in `execute()` is only used for getting the
+            aggregate type and stream_id, at least for now. It should be the
+            place to enforce business/domain rules. This is still a gray area
+            for me, but the UI/API would/should take care of this part. For
+            example, in order to avoid duplicate emails/phones/etc for a user,
+            make the UI so that the user sees that the current values first,
+            and checks can be included there too.)
+
+           ```
+                                                   ____________
+                                                  /            \
+                                                 |              |
+                                                 V              |
+                                              ___ _             |
+                                             /     \            |
+           aggregates.<type>.( new_instance | look_up )         |
+           |          _________/                /     |         |
+           |         /                         /      |         |
+           |     NEW_STATE                    /       |         |
+           |      |    |                     /        |         |
+           |      V    |                    /         |         |
+           |    STATE  |              STATE_STORE     |         |
+           |    STORE  |                /             |         |
+           |           |       ________/              |         |
+           |            \     /                       |         |
+           |             \   /                        |         |
+           \______________\ /_________________________/         |
+                           |                                    |
+                           |                                    |
+                           V                                    |
+           execute( current_state, COMMAND )                    |
+           \_____________________   ______/                     |
+                                  |                             |
+                                  V                             |
+                                EVENT                           |
+                                  |                             |
+                                  V                             |
+                             EVENT_STORE                        |
+                                  |                             |
+                                  V                             |
+                            `on()` LISTENERS                    |
+                                  |                             |
+                                  V                             |
+           apply( current_state, EVENT )                        |
+           \___________   ____________/                         |
+                        |                                       |
+                        |                                       |
+                        V                                       |
+                    NEXT_STATE                                  |
+                        |                                       |
+                        V                                       |
+                   STATE_STORE (in-memory)                      |
+                        |                                       |
+                        V                                       |
+                   /STATE (Firebase Realtime DB)                |
+                        |                                       |
+                        |_______________________________________|
+        */
+
+        /* Two use cases:
+
+           `new_instance()` will create a new stream (i.e., a stream_id)
+
+           `new_instance(stream_id)` will create an instance stub with the stream_id,
+                                     to make it possible to recreate state, when there
+                                     isn't any previous one at all. For example, after
+                                     server restart "state_store" is empty of course,
+                                     and "/state" is deleted for whatever reason. */
+        new_instance: function(stream_id) {
+
+            const state =
+                {
+                    aggregate: 'people',
+                    /* Including the stream_id in the instance state, because
+                    there is no way (or at least I don't know of any) to
+                    query the key if you know the value. */
+                    stream_id: (stream_id === undefined) ? create_new_stream() : stream_id,
+                    timestamp: 0
+                };
+
+            state_store[stream_id] = state;
+
+            return state;
+        },
+
+        look_up: function(stream_id) {
+
+            return state_store[stream_id];
         },
 
         commands: {
@@ -414,32 +502,30 @@ const aggregates = {
     },
 };
 
-/* aggregate_instance = object holding current state; ignored for new stream
+/* state = Aggregate instance object (i.e., a stream's end state)
+           holding current state; ignored for new stream.
 
    p =  {
            (REQUIRED) command: string_from_aggregates_commands,
            (REQUIRED) payload: object_conforming_to_command_in_aggregates,
                       callback: function // no use for it so far
         }
+
+   `execute` won't check for the existence of "stream_id"s, that's
+   the job of whatever process would invoke it. The "aggregates" object
+   has convenience functions for every aggregate to get an instance
+   with a stream_id:
+
+     + `aggregates.<type>.new_instance`:
 */
-function execute(aggregate_instance, p) {
+function execute(state, p) {
 
 
     if (p.callback) {
         p.callback();
     }
 
-    /* TODO: add some extra checks on what commands should trigger
-             the creation of a new stream. There should only be one
-             per aggregate.
-
-             Or push this to the UI/API as well?
-    */
-    const is_stream_new = (aggregate_instance.stream_id === undefined);
-    const stream_id = (is_stream_new) ? create_new_stream() : aggregate_instance.stream_id;
-
-    const aggregate_type = aggregate_instance.type;
-    const c = aggregates[aggregate_type]["commands"][p.command];
+    const c = aggregates[state.aggregate]["commands"][p.command];
 
     if (c === undefined) {
         throw `command "${p.command}" does not exist`;
@@ -456,7 +542,7 @@ function execute(aggregate_instance, p) {
     const event =
         create_event(
             {
-                "aggregate_type":  aggregate_type,
+                "aggregate":  state.aggregate,
                 "event_name": c.event_name,
                 "fields":     fields,
                 "timestamp":  FIREBASE_APP.database.ServerValue.TIMESTAMP,
@@ -464,7 +550,7 @@ function execute(aggregate_instance, p) {
             }
         );
 
-    append_event_to_stream(stream_id, event);
+    append_event_to_stream(state.stream_id, event);
 }
 
 var state_store = {};
@@ -500,7 +586,7 @@ function cling() {
 
             state_store =
                 (state_snapshot.val() === null)
-                ? state_store 
+                ? state_store
                 : Object.assign(state_store, state_snapshot.val())
         }
     ).then(
@@ -529,11 +615,9 @@ function cling() {
                             // const event_snapshot = event_snapshot.child(stream_id).child(event_id);
                             const event = event_snapshot.val();
 
-                            const aggregate = event.aggregate;
-
                             /* Get the `apply` function that should be
                                 used with the current event. */
-                            const event_handlers = aggregates[aggregate]["event_handlers"];
+                            const event_handlers = aggregates[event.aggregate]["event_handlers"];
 
                             var apply;
                             if ( event_handlers[event.event_name] !== undefined ) {
@@ -544,15 +628,25 @@ function cling() {
                             };
                             /* ===================================== */
 
-                            if (state_store[aggregate] === undefined) {
-                                state_store[aggregate] = {};
+                            /* If server has been restarted, and there is no
+                               previous state at all at "/state" (e.g., deleted
+                               for testing or by accident), there needs to be a
+                               stub to start applying the events on top of.
+
+                               Once the system is working, new streams are created
+                               via the `aggregates.<type>.new_instance()` commands,
+                               but when in the case of the above situation, this is
+                               here to jump start the process. */
+
+                            if (state_store[stream_id] === undefined) {
+                            /* If ^^^^^^^^^^^^^^^^^^^^ is undefined at this point
+                               then it means that "/state" is also gone in the DB
+                               (because that path is queried first in `cling()` and
+                               then passed over to the in-memory "state_store"). */
+                                aggregates[event.aggregate].new_instance(stream_id);
                             }
 
-                            if (state_store[aggregate][stream_id] === undefined) {
-                                state_store[aggregate][stream_id] = { timestamp: 0};
-                            }
-
-                            const instance_previous_state  = state_store[aggregate][stream_id];
+                            const instance_previous_state  = state_store[stream_id];
                             const previous_state_timestamp = instance_previous_state.timestamp;
 
                             /* TEST: `cling()` not invoked, add events, and start */
@@ -565,7 +659,7 @@ function cling() {
                                 projectile["timestamp"] = event.timestamp;
 
                                 Object.assign(instance_previous_state, projectile);
-                                FIREBASE_APP.database().ref(`/state/${aggregate}`).child(stream_id).update(instance_previous_state);
+                                FIREBASE_APP.database().ref("/state").child(stream_id).update(instance_previous_state);
                             }
                         }
                     );
@@ -594,12 +688,25 @@ const public_commands = {
            (REQUIRED) first_name: "",
            (REQUIRED) last_name:  "",
                       username:   "", // "first_name" + "last_name" by default
-           (REQUIRED) user_id:    "",
+           (REQUIRED) user_id:    "", // i.e., person stream_id
            (REQUIRED) email:      "",
                       address:    "",
                       phone_number: "",
            (REQUIRED) account_type: [ "admin" | "reader" | "listener" ],
        }
+    */
+    /* USER_ID = PEOPLE INSTANCE (i.e., person) STREAM_ID
+
+       A person can be member to multiple groups, but using the same
+       "stream_id" for all; they cannot be added multiple times anyway
+       and easier to check for presence.
+
+       QUESTION: Is this a good idea?
+
+       ANSWER: No, but with Firebase, there can only be one user with the
+               same email, therefore group membership is an artificial
+               construct, and authorization will be implemented using
+               security rules.
     */
     add_user: function(person) {
 
@@ -613,15 +720,6 @@ const public_commands = {
                 "displayName":  person.username,
                 "email":        person.email,
                 "phoneNumber":  person.phone_number,
-                /* A person can be member to multiple groups, but using the same
-                   "stream_id"; they cannot be added multiple times anyway and
-                   easier to check for presence.*/
-                // TODO: Is the above a good idea?...
-                /* ANSWER: No, but with Firebase, there can be one user with the
-                           same email, therefore group membership is an artificial
-                           construct, and authorization will be implemented using
-                           security rules.
-                */
                 "uid":          person.user_id
             }
         ).then(
