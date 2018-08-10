@@ -95,7 +95,7 @@ function append_event_to_stream(stream_id, event) {
     updates[`/event_store/${stream_id}/${event_id}`] = event;
     updates[`/events/${event_id}`] = event;
 
-    db.ref().update(updates);
+    return db.ref().update(updates);
 };
 
 /* NOTE: Event fields need to be one-dimensonal (-> easier to check
@@ -550,7 +550,7 @@ function execute(state, p) {
             }
         );
 
-    append_event_to_stream(state.stream_id, event);
+    return append_event_to_stream(state.stream_id, event);
 }
 
 var state_store = {};
@@ -669,6 +669,7 @@ function cling() {
     )
 }
 
+cling();
 /* The rationale behind creating this collection is twofold:
 
      + TECHNICAL: Firebase commands are asynchronous, and they return promises,
@@ -688,7 +689,7 @@ const public_commands = {
            (REQUIRED) first_name: "",
            (REQUIRED) last_name:  "",
                       username:   "", // "first_name" + "last_name" by default
-           (REQUIRED) user_id:    "", // i.e., person stream_id
+       ??? (REQUIRED) user_id:    "", // i.e., person stream_id
            (REQUIRED) email:      "",
                       address:    "",
                       phone_number: "",
@@ -708,39 +709,102 @@ const public_commands = {
                construct, and authorization will be implemented using
                security rules.
     */
-    add_user: function(person) {
+    add_user: function(p) {
 
-        if (person.username === undefined) {
-            person["username"] = `${person.first_name} ${person.last_name}`;
+        const person = aggregates.people.new_instance();
+
+        // TODO create a function for optional parameter checks
+        if (p.username === undefined) {
+            p["username"] = `${p.first_name} ${p.last_name}`;
         }
-
-        FIREBASE_APP.auth().createUser(
-            {
-                "disabled":     false,
-                "displayName":  person.username,
-                "email":        person.email,
-                "phoneNumber":  person.phone_number,
-                "uid":          person.user_id
-            }
+                                                   // TODO
+        FIREBASE_APP.auth().createUser(            // move
+            {                                      // this
+                "disabled":     false,             // to
+                "displayName":  p.username,        // the
+                "email":        p.email,           // end
+                "phoneNumber":  p.phone_number,    //  |
+                "uid":          person.stream_id   //  |
+            }                                      //  |
         ).then(
             function(user_record) {
 
-                const person = aggregates.people.new_instance();
-
+                // /*
+                // TODO these do need to go into a promise.
+                // TODO do make a "macro" with `Function`. Use `Array.reduce()`
+                //      where the initial element is the first command in string
+                //      so that the rest can be just chained.
                 const commands =
                     [
                         {
                             command: "add_person",
                             payload: {
-                                "first_name": person.first_name,
-                                "last_name":  person.last_name
+                                "first_name": p.first_name,
+                                "last_name":  p.last_name
                             }
                         },
                         {
                             command: "add_email",
-                            payload: { "email": person.email }
-                        }
+                            payload: { "email": p.email }
+                        },
+                        {
+                            command: "add_phone_number",
+                            payload: { "phone_number": p.phone_number }
+                        },
+                        {
+                            command: "add_to_group",
+                            payload: { "group": `${p.account_type}s` }
+                        },
                     ]
+
+                commands.forEach(
+                    function(command) {
+                        execute(person, command);
+                    }
+                );
+                // */
+                /* New commands can be added as needed.
+
+                   "person" is added to each subsequent iteration because only
+                   the stream_id and the aggregate type is needed. */
+                /*
+                execute(
+                    person,
+                    {
+                        command: "add_person",
+                        payload: {
+                            "first_name": p.first_name,
+                            "last_name":  p.last_name
+                        }
+                    }).then(
+                        function() {
+                            return execute(
+                                person,
+                                {
+                                    command: "add_email",
+                                    payload: { "email": p.email }
+                                });
+                        }
+                    ).then(
+                        function() {
+                            return execute(
+                                person,
+                                {
+                                    command: "add_phone_number",
+                                    payload: { "phone_number": p.phone_number }
+                                });
+                        }
+                    ).then(
+                        function() {
+                            return execute(
+                                person,
+                                {
+                                    command: "add_to_group",
+                                    payload: { "group": `${p.account_type}s` }
+                                });
+                        }
+                    );
+                    */
             }
         );
     }
@@ -815,6 +879,7 @@ module.exports = {
     cling,
     state_store,
     apply_factories,
+    public_commands
 };
 
 // const f = require('./admin-functions.js');
