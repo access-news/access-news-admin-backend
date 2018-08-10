@@ -158,7 +158,7 @@ function cast_event_payload(o) {
 
 /* 1. Aggregate and helpers */
 
-const apply_factories = {
+const event_handler_factory = {
 
     /* Factories with "multi" in their name are for attributes (value objects
        in DDD?), that can have multiple values simultaneously. For example,
@@ -304,7 +304,10 @@ const aggregates = {
                                      to make it possible to recreate state, when there
                                      isn't any previous one at all. For example, after
                                      server restart "state_store" is empty of course,
-                                     and "/state" is deleted for whatever reason. */
+                                     and "/state" is deleted for whatever reason.
+
+                                     (See `apply()` for a more thorough description.)
+        */
         new_instance: function(stream_id) {
 
             const state =
@@ -419,41 +422,41 @@ const aggregates = {
                 },
 
             "email_added":
-                apply_factories.add_for_multi({
+                event_handler_factory.add_for_multi({
                     state_attribute: "emails",
                     event_field:     "email"
                 }),
 
             "email_updated":
-                apply_factories.update_for_multi({
+                event_handler_factory.update_for_multi({
                     state_attribute: "emails",
                     event_field:     "email"
                 }),
 
             "email_deleted":
-                apply_factories.delete_for_multi({
+                event_handler_factory.delete_for_multi({
                     state_attribute: "emails"
                 }),
 
             "phone_number_added":
-                apply_factories.add_for_multi({
+                event_handler_factory.add_for_multi({
                     state_attribute: "phone_numbers",
                     event_field:     "phone_number"
                 }),
 
             "phone_number_updated":
-                apply_factories.update_for_multi({
+                event_handler_factory.update_for_multi({
                     state_attribute: "phone_numbers",
                     event_field:     "phone_number"
                 }),
 
             "phone_number_deleted":
-                apply_factories.delete_for_multi({
+                event_handler_factory.delete_for_multi({
                     state_attribute: "phone_numbers"
                 }),
 
             "added_to_group":
-                /* The `apply_factories.*_for_multi()` functions are not appropriate
+                /* The `event_handler_factory.*_for_multi()` functions are not appropriate
                    here, because there aren't many groups and these could be just
                    added as a list (which is tricky with Firebase's Realtime DB).
 
@@ -576,7 +579,7 @@ var state_store = {};
                  -LJ2OL1NZEQBpiA_mPDh (event)
                  -LJ2TkQjSfhV39SXWoDh (event)
 */
-function cling() {
+function apply() {
 
     // Fetch previous state.
     const db = FIREBASE_APP.database();
@@ -628,7 +631,9 @@ function cling() {
                             };
                             /* ===================================== */
 
-                            /* If server has been restarted, and there is no
+                            /* SCENARIO I
+                               ----------
+                               If the server has been restarted, and there is no
                                previous state at all at "/state" (e.g., deleted
                                for testing or by accident), there needs to be a
                                stub to start applying the events on top of.
@@ -636,12 +641,34 @@ function cling() {
                                Once the system is working, new streams are created
                                via the `aggregates.<type>.new_instance()` commands,
                                but when in the case of the above situation, this is
-                               here to jump start the process. */
+                               here to jump start the process.
+
+                               SCENARIO II
+                               -----------
+                               On creating a new aggregate instance (i.e. a stream),
+                               the next state provided by `apply()` will need a
+                               place to live. (Remember, `execute(state, command)`
+                               only writes to the EVENT_STORE, and `apply(state, event)`
+                               to the STATE_STORE!)
+
+                               Example:
+
+                               ```
+                                 // ! Also adds a new entry to STATE_STORE !
+                                 const new_person = aggregates.people.new_instance();
+                                 //       |                                                         
+                                 //       `-> {                                                     
+                                 //               aggregate: 'people',
+                                 //               stream_id: create_new_stream(), // -> new stream_id
+                                 //               timestamp: 0
+                                 //           };
+                                 execute(
+                            */
 
                             if (state_store[stream_id] === undefined) {
                             /* If ^^^^^^^^^^^^^^^^^^^^ is undefined at this point
                                then it means that "/state" is also gone in the DB
-                               (because that path is queried first in `cling()` and
+                               (because that path is queried first in `apply()` and
                                then passed over to the in-memory "state_store"). */
                                 aggregates[event.aggregate].new_instance(stream_id);
                             }
@@ -649,7 +676,7 @@ function cling() {
                             const instance_previous_state  = state_store[stream_id];
                             const previous_state_timestamp = instance_previous_state.timestamp;
 
-                            /* TEST: `cling()` not invoked, add events, and start */
+                            /* TEST: `apply()` not invoked, add events, and start */
                             if (event.timestamp <= previous_state_timestamp) {
                                 console.log(`${event_id} do nothing` );
                             } else {
@@ -669,7 +696,7 @@ function cling() {
     )
 }
 
-cling();
+apply();
 /* The rationale behind creating this collection is twofold:
 
      + TECHNICAL: Firebase commands are asynchronous, and they return promises,
@@ -711,6 +738,13 @@ const public_commands = {
     */
     add_user: function(p) {
 
+        /* THIS ALSO CREATES AN ENTRY IN THE -> STATE_STORE <-
+
+           (Unfortunately the shouting is necessary because
+           I am an idiot and keep forgetting my own solutions.
+           Almost made a convoluted workaround carrying state
+           that has already been solved just this morning.)
+        */
         const person = aggregates.people.new_instance();
 
         // TODO create a function for optional parameter checks
@@ -876,15 +910,15 @@ module.exports = {
     FIREBASE_APP,
     aggregates,
     execute,
-    cling,
+    apply,
     state_store,
-    apply_factories,
+    event_handler_factory,
     public_commands
 };
 
 // const f = require('./admin-functions.js');
 // const p1 = f.aggregates.people.new_instance(); f.execute(p1, 'add_person', { first_name: "Kilgore", last_name: "Troutman"})
-// f.cling()
+// f.apply()
 // const p2 = f.aggregates.people.new_instance(); f.execute(p2, 'add_person', { first_name: "Jorge", last_name: "Avenfasz"})
 
 // TEST NAME CHANGE
