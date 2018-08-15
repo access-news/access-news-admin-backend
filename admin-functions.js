@@ -206,6 +206,7 @@ const factories = {
             {
                 event_name:      'email_added',
                 required_fields: ['email'],
+                constraint:      callback taking "params" (see "add_to_group" for an example)
             }
         */
 
@@ -228,6 +229,10 @@ const factories = {
                         "payload": p.payload
                     },
                 );
+
+            if (params.constraint !== undefined) {
+                params.constraint(fields);
+            }
 
             /* The "callback" parameter is to include any logic that
                 needs to be enforced, and either throw error(s) or
@@ -414,13 +419,32 @@ const aggregates = {
             "add_to_group":
                 factories.command({
                     event_name:      "added_to_group",
-                    required_fields: ['group'] // 'user_id' omitted as it is the stream_id for now
+                    required_fields: ['group'], // 'user_id' omitted as it is the stream_id for now
+                    constraint:
+                        function(fields) {
+
+                            const valid_groups = ['admins', 'listeners', 'readers'];
+
+                            if (valid_groups.includes(fields.group) !== true) {
+                                throw `"group" must be one of ${valid_groups}`
+                            }
+                        }
                 }),
 
             "remove_from_group":
                 factories.command({
                     event_name:      "removed_from_group",
-                    required_fields: ['group']
+                    required_fields: ['group'],
+                    /* Exactly the same as for "added_to_group". */
+                    constraint:
+                        function(fields) {
+
+                            const valid_groups = ['admins', 'listeners', 'readers'];
+
+                            if (valid_groups.includes(fields.group) !== true) {
+                                throw `"group" must be one of ${valid_groups}`
+                            }
+                        }
                 }),
         },
 
@@ -785,16 +809,17 @@ apply();
 */
 const public_commands = {
 
-    /* person =
+    add_user: function(p) {
+    /* p =
        {
            (REQUIRED) first_name: "",
            (REQUIRED) last_name:  "",
                       username:   "", // "first_name" + "last_name" by default
-       ??? (REQUIRED) user_id:    "", // i.e., person stream_id
+           (REQUIRED) user_id:    "", // i.e., person stream_id
            (REQUIRED) email:      "",
                       address:    "",
                       phone_number: "",
-           (REQUIRED) account_type: [ "admin" | "reader" | "listener" ],
+           (REQUIRED) account_types: [ "admin" | "reader" | "listener" ], // array
        }
     */
     /* USER_ID = PEOPLE INSTANCE (i.e., person) STREAM_ID
@@ -810,186 +835,111 @@ const public_commands = {
                construct, and authorization will be implemented using
                security rules.
     */
-    add_user: function(p) {
 
-        /* THIS ALSO CREATES AN ENTRY IN THE -> STATE_STORE <-
+        const p_keys = Object.keys(p);
+        p_keys.forEach(
+            function(param) {
+                if (p[param] === undefined) {
+                    throw `Required keys: ${p_keys}`
+                }
+            }
+        );
 
-           (Unfortunately the shouting is necessary because
-           I am an idiot and keep forgetting my own solutions.
-           Almost made a convoluted workaround carrying state
-           that has already been solved just this morning.)
-        */
-        const person = aggregates.people.new_instance();
+        function make_execute_object(o) {
+
+            const p =
+                {
+                    user_id: create_new_stream_id(),
+                    aggregate: "people"
+                };
+
+         return Object.assign(p, o);
+        }
 
         // TODO create a function for optional parameter checks
         if (p.username === undefined) {
             p["username"] = `${p.first_name} ${p.last_name}`;
         }
-                                                   // TODO
-        FIREBASE_APP.auth().createUser(            // move
-            {                                      // this
-                "disabled":     false,             // to
-                "displayName":  p.username,        // the
-                "email":        p.email,           // end
-                "phoneNumber":  p.phone_number,    //  |
-                "uid":          person.stream_id   //  |
-            }                                      //  |
-        ).then(
-            function(user_record) {
 
-                // /*
-                // TODO these do need to go into a promise.
-                // TODO do make a "macro" with `Function`. Use `Array.reduce()`
-                //      where the initial element is the first command in string
-                //      so that the rest can be just chained.
-                const commands =
-                    [
-                        {
-                            command: "add_person",
-                            payload: {
-                                "first_name": p.first_name,
-                                "last_name":  p.last_name
-                            }
-                        },
-                        {
-                            command: "add_email",
-                            payload: { "email": p.email }
-                        },
-                        {
-                            command: "add_phone_number",
-                            payload: { "phone_number": p.phone_number }
-                        },
-                        {
-                            command: "add_to_group",
-                            payload: { "group": `${p.account_type}s` }
-                        },
-                    ]
+        /* On success: returns Promise containing non-null admin.auth.UserRecord. */
 
-                commands.forEach(
-                    function(command) {
-                        execute(person, command);
+        /* TODO Make this a transaction.
+
+                It is  nice that the  promise chaining below  ensures the
+                sequence of commands, but if one fails, the chain breaks,
+                but  what has  been done  will not  get undone.  This may
+                not  be  an  issue  because of  command  idempotency  and
+                EVENT_STORE immutability, but may be nicer.
+
+                ! Checks  for ALL  commands participating  in a  public
+                ! command  should  be  done  beforehand so  as  not  to
+                ! pollute  the  EVENT_STORE  with balancing  events  if
+                ! params are not good.
+        */
+        return execute(
+            make_execute_object(
+                {
+                    commandString: "add_person",
+                    payload: {
+                        "first_name": p.first_name,
+                        "last_name":  p.last_name
                     }
-                );
-
-                /* To promise chain compatible commands together and synchronize writes to the DB.
-                   This way events write order would be ensured, as the next write only happens if
-                   the previous one was successful.
-
-                   aggregates.people.execute(stream_id, commandString_1, payload_1).then(
-                       function() {
-                           return aggregates.people.execute(stream_id, commandString_2, payload_2);
-                       }.then(
-                           function() {
-                               return aggregates.people.execute(stream_id, commandString_2, payload_2);
-                            }
-                       ).then(...)
-                */
-
-                // */
-                /* New commands can be added as needed.
-
-                   "person" is added to each subsequent iteration because only
-                   the stream_id and the aggregate type is needed. */
-                /*
-                execute(
-                    person,
-                    {
-                        command: "add_person",
-                        payload: {
-                            "first_name": p.first_name,
-                            "last_name":  p.last_name
-                        }
-                    }).then(
-                        function() {
-                            return execute(
-                                person,
-                                {
-                                    command: "add_email",
-                                    payload: { "email": p.email }
-                                });
-                        }
-                    ).then(
-                        function() {
-                            return execute(
-                                person,
-                                {
-                                    command: "add_phone_number",
-                                    payload: { "phone_number": p.phone_number }
-                                });
-                        }
-                    ).then(
-                        function() {
-                            return execute(
-                                person,
-                                {
-                                    command: "add_to_group",
-                                    payload: { "group": `${p.account_type}s` }
-                                });
-                        }
-                    );
-                    */
-            }
-        );
-    }
-}
-
-/* firebase_admin.auth().createUser({ email: person.email }).then(function(userRecord) {
-
-        const db = firebase_admin.database();
-        const people_ref = db.ref("event_store");
-        const timestamp = firebase_admin.database.ServerValue.TIMESTAMP;
-
-         // If user creation is successful, save "person_added" event, ...
-
-        store_event(
-            people_ref,
-            "person_added",
-            {
-                "user_id": userRecord.uid,
-                "name": {
-                    "first": person.name.first,
-                    "last":  person.name.last
                 }
-            },
-            timestamp,
-            0
-
-        ).then(function(_ref) {
-
-            //  ... save "person_email_added" after above event finishes, and ...
-
-            store_event(
-                people_ref,
-                "person_email_added",
-                {
-                    "user_id": userRecord.uid,
-                    "value":   person.email
-                },
-                timestamp,
-                0
             )
-        }).then(function(_ref) {
+        ) .then( function() {
 
-            //  ... finally store the "<account>_added" event.
-
-            const account_event = account_type + "_added";
-
-            store_event(
-                db.ref("event_store"),
-                account_event,
-                {
-                    "user_id":  userRecord.uid,
-                    "username": person.email
-                },
-                timestamp,
-                0
+            execute(
+                make_execute_object(
+                    {
+                        commandString: "add_email",
+                        payload: { "email": p.email }
+                    }
+                )
             );
-        }).catch(function(error) { console.log(error) });
+        }).then( function() {
 
-        firebase_client.auth().sendPasswordResetEmail(person.email);
-    });
-};
-*/
+            execute(
+                make_execute_object(
+                    {
+                        commandString: "add_phone_number",
+                        payload: { "phone_number": p.phone_number }
+                    }
+                )
+            )
+        }).then( function() {
+
+            account_types.forEach(
+                /* TODO Make this loop a transaction.
+
+                        Right now  it will throw  error when one of  the provided
+                        groups does not exist,  making the previous ones succeed,
+                        but end abruptly at the wrong one.
+                */
+                function(group) {
+                    execute(
+                        make_execute_object(
+                            {
+                                command: "add_to_group",
+                                payload: { "group": `${p.account_types}s` }
+                            },
+                        )
+                    )
+                }
+            );
+        }).then( function() {
+
+            FIREBASE_APP.auth().createUser(
+                {
+                    "disabled":    false,
+                    "displayName": p.username,
+                    "email":       p.email,
+                    "phoneNumber": p.phone_number,
+                    "uid":         person.stream_id
+                }
+            )
+        })
+    },
+}
 
 module.exports = {
     init_firebase_admin,
@@ -1012,10 +962,14 @@ f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandStri
 f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
 
 var elrodeos_streamid = "-LJyn38qc8u-_z9ofT4S";
-var alvaros_streamid  = "-LJyn39J7jMGWMerGQjr";
 f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_email", payload: { email: "el@rod.eo" }});
 f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_email", payload: { email: "meg@egy.com" }});
 f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_phone_number", payload: {phone_number: "777"}});
+// TESTING ADDING AND REMOVING GROUPS
+f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_to_group", payload: {group: "admin"}});
+f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "remove_from_group", payload: {group: "admin"}});
+
+var alvaros_streamid  = "-LJyn39J7jMGWMerGQjr";
 f.execute({stream_id: alvaros_streamid, aggregate: "people", commandString: "add_phone_number", payload: {phone_number: "111"}});
 
 var elrodeos_emailid = "-LJynZJrXCBuo0HFMB_4";
