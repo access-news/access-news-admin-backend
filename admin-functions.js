@@ -652,8 +652,6 @@ function apply() {
 
                     const event_id = event_snapshot.ref.getKey();
 
-                    console.log(event_id);
-                    console.log(stream_id);
                     /* Get the event handler that should be used with the
                         current event.
 
@@ -722,7 +720,11 @@ function apply() {
                         state_store[stream_id] =
                             {
                                 aggregate: event.aggregate,
-                                timestamp: event.timestamp
+                                /* Setting timestamp to zero is necessary, otherwise the timestamp
+                                   check below will think that the very first event in each agggregate
+                                   is alreay applied.
+                                */
+                                timestamp: 0
                             };
 
                     }
@@ -733,24 +735,28 @@ function apply() {
                     const event_handler = aggregates[event.aggregate]["event_handlers"][event.event_name];
 
                     /* Comparing  the events'  and  the states'  timestamps,  to check  whether
-                    events come in  in order, is unnecessary for reasons  below, but keeping
-                    it, becuase if there is some state in the DB, the already applied events
-                    can be just skipped.
+                       events come in  in order, is unnecessary for reasons  below, but keeping
+                       it, becuase if there is some state in the DB, the already applied events
+                       can be just skipped.
 
-                    + End  user  public functions  (such  as  `add_user()`) should  chain
-                        commands in a way that ensures the order (i.e., promise chaining of
-                        `append_event_to_stream()`).
+                       + End  user  public functions  (such  as  `add_user()`) should  chain
+                           commands in a way that ensures the order (i.e., promise chaining of
+                           `append_event_to_stream()`).
 
-                    + Each event has the stream_id, and if there is no stream, it will be
-                        created by the check above.  For example, should events "add_email"
-                        and "add_person" arrive  in this order, it wouldn't  cause an issue
-                        (right?) as  a state-stup would be  created for the email,  and the
-                        "add_person" event would be applied on top of it.
+                       + Each event has the stream_id, and if there is no stream, it will be
+                           created by the check above.  For example, should events "add_email"
+                           and "add_person" arrive  in this order, it wouldn't  cause an issue
+                           (right?) as  a state-stup would be  created for the email,  and the
+                           "add_person" event would be applied on top of it.
+
+                       `=` is needed becuause otherwise it will always replay the last event.
+                       (Matching timestamps will evaluate `<` to false).
                     */
-                    if (event.timestamp < stream_state_timestamp) {
-                        console.log(`${event.event_name} ${event_id} - do nothing` );
+                    if (event.timestamp <= stream_state_timestamp) {
+                        console.log(`${stream_id} ${event_id} do nothing (${event.timestamp}, ${stream_state_timestamp}) ${event.event_name}` );
+                        return;
                     } else {
-                        console.log(`${event.event_name} ${event_id} - replay event and return` );
+                        console.log(`${stream_id} ${event_id} replay     (${event.timestamp}, ${stream_state_timestamp}) ${event.event_name}` );
 
                         var stream_next_state = event_handler(event_snapshot, stream_state);
                         stream_next_state["timestamp"] = event.timestamp;
