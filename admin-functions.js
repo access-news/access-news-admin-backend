@@ -1005,13 +1005,16 @@ var f = require('./admin-functions.js');
 f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }});
 f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
 
-
-var elrodeos_streamid = "-LJpRoUFK7b8czjQqckN";
-var alvaros_streamid  = "-LJpS1bCV8-cMftgz87w";
+var elrodeos_streamid = "-LJyn38qc8u-_z9ofT4S";
+var alvaros_streamid  = "-LJyn39J7jMGWMerGQjr";
 f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_email", payload: { email: "el@rod.eo" }});
+f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_email", payload: { email: "meg@egy.com" }});
 f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_phone_number", payload: {phone_number: "777"}});
 f.execute({stream_id: alvaros_streamid, aggregate: "people", commandString: "add_phone_number", payload: {phone_number: "111"}});
 
-var elrodeos_emailid = "-LJpRoUIP0SZMgmaJ3As";
+var elrodeos_emailid = "-LJynZJrXCBuo0HFMB_4";
 f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "update_email", payload: { email: "el@rod.eo", event_id: elrodeos_emailid, reason: "testing"}});
+
+var elrodeos_phone_id = "-LJynZK2vtw5ZtydAMHh";
+f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "update_phone_number", payload: { phone_number: "333", event_id: elrodeos_phone_id, reason: "testing"}});
 */
