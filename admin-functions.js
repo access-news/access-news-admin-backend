@@ -154,21 +154,18 @@ const factories = {
                     const event    = event_snapshot.val();
                     const event_id = event_snapshot.ref.getKey();
 
-                    // The current state will be used to build the next state.
-                    var state    = stream_state;
-
                     // Check if any emails have been added previously
-                    if (state["${o.state_attribute}"] === undefined) {
-                        state["${o.state_attribute}"] = {};
-                        state["${o.state_attribute}"][event_id] = event["fields"]["${o.event_field}"];
+                    if (stream_state["${o.state_attribute}"] === undefined) {
+                        stream_state["${o.state_attribute}"] = {};
+                        stream_state["${o.state_attribute}"][event_id] = event["fields"]["${o.event_field}"];
                     } else {
                         var update = {};
                         update[event_id] = event["fields"]["${o.event_field}"];
-                        Object.assign(state["${o.state_attribute}"] , update);
+                        Object.assign(stream_state["${o.state_attribute}"] , update);
                     };
 
                     // Return the mutated state.
-                    return state;
+                    return stream_state;
                     `)
         },
 
@@ -177,11 +174,9 @@ const factories = {
             return new Function("event_snapshot", "stream_state",
                     `
                     const event = event_snapshot.val();
-                    var   state = stream_state;
+                    stream_state["${o.state_attribute}"][event.fields.event_id] = event["fields"]["${o.event_field}"];
 
-                    state["${o.state_attribute}"][event.fields.event_id] = event["fields"]["${o.event_field}"];
-
-                    return state;
+                    return stream_state;
                     `)
         },
 
@@ -192,11 +187,10 @@ const factories = {
             return new Function("event_snapshot", "stream_state",
                     `
                     const event = event_snapshot.val();
-                    var   state = stream_state;
 
-                    state["${o.state_attribute}"][event.fields.event_id] = null;
+                    stream_state["${o.state_attribute}"][event.fields.event_id] = null;
 
-                    return state;
+                    return stream_state;
                     `)
         },
     },
@@ -210,7 +204,7 @@ const factories = {
             }
         */
 
-        return function(state, p) {
+        return function(stream_state, p) {
 
             /* The `p` object is handed down from execute:
                 {
@@ -242,18 +236,18 @@ const factories = {
                 parameter unchanged.
             */
             if (p.callback === undefined) {
-                p.callback = function(state, fields) { return fields };
+                p.callback = function(stream_state, fields) { return fields };
             }
 
             const event =
                 {
                     "aggregate":  p.aggregate,
                     "event_name": params.event_name,
-                    "fields":     p.callback(state, fields),
+                    "fields":     p.callback(stream_state, fields),
                     "timestamp":  FIREBASE_APP.database.ServerValue.TIMESTAMP,
                     "stream_id":  p.stream_id,
                     "version":    EVENT_VERSION,
-                    "seq":        state_store.seq
+                    "seq":        p.seq
 
                 }
 
@@ -459,18 +453,20 @@ const aggregates = {
             /* Don't need the previous state, because this command creates a
                brand new instance, so there is nothing to mess up. */
             "person_added":
-                function(event_snapshot) {
-                    return { "name": event_snapshot.val().fields };
+                function(event_snapshot, stream_state) {
+
+                    stream_state["name"] = event_snapshot.val().fields;
+
+                    return stream_state;
                 },
 
             "person_name_changed":
-                function(event_snapshot, instance_state_object) {
-                    const event    = event_snapshot.val();
+                function(event_snapshot, stream_state) {
+                    const event = event_snapshot.val();
                     // The previous state will be used to build the new state.
-                    var state    = instance_state_object;
-                    state["name"] = event.fields;
+                    stream_state["name"] = event.fields;
 
-                    return state;
+                    return stream_state;
                 },
 
             "email_added":
@@ -524,10 +520,10 @@ const aggregates = {
                    There may be a pattern emerging later, but leaving this as is
                    until then.
                 */
-                function(event_snapshot, instance_state_object) {
+                function(event_snapshot, stream_state) {
 
                     // The previous state will be used to build the new state.
-                    var state   = instance_state_object;
+                    var state   = stream_state;
                     const event = event_snapshot.val();
 
                     if (state["groups"] === undefined) {
@@ -542,9 +538,9 @@ const aggregates = {
                 },
 
             "removed_from_group":
-                function(event_snapshot, instance_state_object) {
+                function(event_snapshot, stream_state) {
 
-                    var state   = instance_state_object;
+                    var state   = stream_state;
                     const event = event_snapshot.val();
 
                     /* Just as in "added_to_group", membership is not checked here.
@@ -598,6 +594,7 @@ function execute(p) {
             commandString: "person_added",
             payload:       { last_name: "Al", first_name:  "Varo"},
             callback:      extra_logic // function for extra constraints in the command
+            seq:           current stream_state["seq"]+1
         }
     */
 
@@ -612,18 +609,13 @@ function execute(p) {
         to inspect it in order to make decisions on what to put in
         the generated events, but will never mutate it.
     */
-    const state = (state_store[p.stream_id] !== undefined) ? state_store[p.stream_id] : {};
-    const event = command(state, p);
-
-    state_store.seq += 1;
+    const stream_state = (state_store[p.stream_id] !== undefined) ? state_store[p.stream_id] : {};
+    const event = command(stream_state, p);
 
     return append_event_to_stream(event);
 };
 
-/* Setting `seq` here to zero in case we want to start the DB from scratch. This way
-`execute()` won't crash after trying to save the first event.
-*/
-var state_store = { seq: 0 };
+var state_store = {};
 
 /* TODO: outdated
    Purpose: (0) Rebuild in-memory ("state_store") and "/state" DB state
@@ -647,6 +639,49 @@ var state_store = { seq: 0 };
                  -LJ2OL1NZEQBpiA_mPDh (event)
                  -LJ2TkQjSfhV39SXWoDh (event)
 */
+
+/* Sequence numbers (`seq`) in events and state
+   ============================================
+
+   --- STATUS: **empty database** ---
+
+   After `require`ing this file, `apply()` is immediately invoked
+
+   1. fetching the current state from the database
+      (which yields `undefined`) and
+
+   2. attaching an `on('child_added',...)` listener on the "/event_store"
+      (mutating the state based on incoming events).
+
+   TODO: this may have become outdated as soon as I have written it down...
+   New events are generated via the  `execute()` command. On the very first
+   command there is only an empty  STATE_STORE, and the stream's state thus
+   will be a  stub (`{seq: 0}`). The event generated  by the command (e.g.,
+   "add_person") takes the current state of  the stream and saves its `seq`
+   incremented by one.
+
+   E      - `execute()`
+   e{num} - event with `seq === num`
+   S{num} - stream's state with its `seq` attribute being `num`.
+   A      - `apply()`
+
+              EVENT_STORE                            STATE_STORE
+   S0 -> E ->    e1       -> A( e1 <= S0) -> false ->    S1
+   S1 -> E ->    e2       -> A( e2 <= S1) -> false ->    S2
+
+   When STATE_STORE is deleted or unreachable, the in-memory STATE_STORE
+   will be rebuilt the same way when the server is restarted.
+
+
+   --- STATUS: **Server stopped, new events came in (e3, e4), server restarted** ---
+
+              EVENT_STORE                                      STATE_STORE
+   S2 -> E ->    e1       -> A( e1 <= S2 ) -> true  -> no op ->    S2
+   S2 -> E ->    e2       -> A( e2 <= S2 ) -> true  -> no op ->    S2
+   S2 -> E ->    e3       -> A( e3 <= S2 ) -> false ->             S3
+   S3 -> E ->    e4       -> A( e4 <= S3 ) -> false ->             S4
+
+*/
 function apply() {
 
     // Fetch previous state.
@@ -663,12 +698,6 @@ function apply() {
         }
     ).then(
 
-        /* "initial_state" refers to the state after a server restart.
-           Used by `applicator()` to replay events in the correct order
-           by comparing timestamps: if the about to be applied event
-           is older, it is applied before the "fetch state" phase
-           (i.e., `ref('/state').once(...)`, see issue #1) and returns
-           early. */
         function() {
 
             const event_store = FIREBASE_APP.database().ref("/event_store");
@@ -726,7 +755,7 @@ function apply() {
                             execute(
                     */
 
-                    if (state_store[stream_id] === undefined) {
+                    if ( state_store[stream_id] === undefined ) {
                     /* Two cases when we can end up here:
 
                         1. "/state" in DB is missing entirely, therefore condition will return
@@ -750,17 +779,12 @@ function apply() {
                         state_store[stream_id] =
                             {
                                 aggregate: event.aggregate,
-                                /* Setting timestamp to zero is necessary, otherwise the timestamp
-                                   check below will think that the very first event in each agggregate
-                                   is alreay applied.
-                                */
-                                // timestamp: 0
+                                seq: 0
                             };
 
                     }
 
                     const stream_state  = state_store[stream_id];
-                    // const stream_state_timestamp = stream_state.timestamp;
 
                     const event_handler = aggregates[event.aggregate]["event_handlers"][event.event_name];
 
@@ -782,17 +806,15 @@ function apply() {
                        `=` is needed becuause otherwise it will always replay the last event.
                        (Matching timestamps will evaluate `<` to false).
                     */
-                    // if (event.timestamp <= stream_state_timestamp) {
-                    if (state_store.seq <= event.seq) {
-                        // console.log(`${stream_id} ${event_id} do nothing (${event.timestamp}, ${stream_state_timestamp}) ${event.event_name}` );
-                        console.log(`${stream_id} ${event_id} no op  (${event.seq}, ${state_store.seq}) ${event.event_name}` );
+                    if ( event.seq <= stream_state.seq ) {
+                        console.log(`${stream_id} ${event_id} no op  (${event.seq}, ${stream_state.seq}) ${event.event_name}` );
                         return;
                     } else {
-                        // console.log(`${stream_id} ${event_id} replay (${event.timestamp}, ${stream_state_timestamp}) ${event.event_name}` );
-                        console.log(`${stream_id} ${event_id} replay (${event.seq}, ${state_store.seq}) ${event.event_name}` );
+                        console.log(`${stream_id} ${event_id} replay (${event.seq}, ${stream_state.seq}) ${event.event_name}` );
+
+                        stream_state["seq"] = event.seq;
 
                         var stream_next_state = event_handler(event_snapshot, stream_state);
-                        stream_next_state["seq"] = event.seq;
 
                         Object.assign(stream_state, stream_next_state);
                         FIREBASE_APP.database().ref("/state").child(stream_id).update(stream_state);
@@ -802,7 +824,32 @@ function apply() {
         }
     )
 }
-apply();
+
+/* TODO: More robust way to keep state.
+
+   Right now, `apply()` has to run immediately after server restart to
+   restore the in-memory state otherwise subsequent events will start
+   counting their sequence numbers (`seq`) from one again. The server side
+   timestamp solution was ideal in theory, but [the Firebase implementation](https://stackoverflow.com/questions/51867616/how-to-come-around-firebase-realtime-databases-server-side-timestamp-volatility)
+   makes it practically useless in this scenario. A workaround would be
+   possible with listeners, but it would probably just complicate things
+   more.
+
+   Just  for the  record,  the  `apply()` rewrite  would  have  to hit  the
+   database **twice**: use `on()` to  listen to 'child_added' events on the
+   EVENT_STORE, and inside  it would add a `once('value')`  listener on the
+   child's key. This is the theory, but won't bother with it.
+
+   To get a more robust solution, commands could query the EVENT_STORE's
+   last event to get `seq` and add 1 to it, but it is prone to the same
+   race condition issues as the others here.
+*/
+/* ADDENDUM: State will be maintained in memory for clients therefore if
+             the server is not running, they would still add events with
+             the right `seq` of each instance. (Or, at least, that is the
+             notion.)
+*/
+// apply();
 
 /* The rationale behind creating this collection is twofold:
 
@@ -967,24 +1014,30 @@ module.exports = {
 
 /*
 var f = require('./admin-functions.js');
-f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }});
-f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
+f.execute({seq: 1, stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }});
+f.execute({seq: 1, stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
 
-var elrodeos_streamid = "-LK-0GwEgg9Q8jM0HlTs";
-f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_email", payload: { email: "el@rod.eo" }});
-f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_email", payload: { email: "meg@egy.com" }});
-f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_phone_number", payload: {phone_number: "777"}});
+var elrodeo = "-LK46YVGQg8e6Hw3DNmH";
+f.execute({seq: 2, stream_id: elrodeo, aggregate: "people", commandString: "add_email", payload: { email: "el@rod.eo" }});
+f.execute({seq: 3, stream_id: elrodeo, aggregate: "people", commandString: "add_email", payload: { email: "meg@egy.com" }});
+
+var alvaro  = "-LK46YVkhW90tzL1JP8C";
+f.execute({seq: 2, stream_id: alvaro, aggregate: "people", commandString: "add_phone_number", payload: {phone_number: "112"}});
+
+f.execute({seq: 4, stream_id: elrodeo, aggregate: "people", commandString: "add_phone_number", payload: {phone_number: "777"}});
 
 // TESTING ADDING AND REMOVING GROUPS
-f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_to_group", payload: {group: "admins"}});
-f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "remove_from_group", payload: {group: "admins"}});
+f.execute({seq: 5, stream_id: elrodeo, aggregate: "people", commandString: "add_to_group", payload: {group: "admins"}});
+f.execute({seq: 6, stream_id: elrodeo, aggregate: "people", commandString: "remove_from_group", payload: {group: "admins"}});
 
-var alvaros_streamid  = "-LJyn39J7jMGWMerGQjr";
-f.execute({stream_id: alvaros_streamid, aggregate: "people", commandString: "add_phone_number", payload: {phone_number: "111"}});
+var elrodeos_emailid = "-LK46kHf06abiUK5-W81";
+f.execute({seq: 7, stream_id: elrodeo, aggregate: "people", commandString: "update_email", payload: { email: "EL@ROD.EO", event_id: elrodeos_emailid, reason: "testing"}});
 
-var elrodeos_emailid = "-LK-0S3L2r-FhzLyhUc8";
-f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "update_email", payload: { email: "EL@ROD.EO", event_id: elrodeos_emailid, reason: "testing"}});
+var alvaros_phone_id = "-LK46uHvLbPskBIMMiM8";
+f.execute({seq: 3, stream_id: alvaro, aggregate: "people", commandString: "update_phone_number", payload: { phone_number: "456", event_id: alvaros_phone_id, reason: "testing"}});
 
-var elrodeos_phone_id = "-LK-0S3rZapmu0lcv2Au";
-f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "update_phone_number", payload: { phone_number: "333", event_id: elrodeos_phone_id, reason: "testing"}});
+f.execute({seq: 4, stream_id: alvaro, aggregate: "people", commandString: "add_to_group", payload: {group: "admins"}});
+
+f.execute({seq: 8, stream_id: elrodeo, aggregate: "people", commandString: "add_to_group", payload: {group: "admins"}});
+f.execute({seq: 9, stream_id: elrodeo, aggregate: "people", commandString: "add_to_group", payload: {group: "listeners"}});
 */
