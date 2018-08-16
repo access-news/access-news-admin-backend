@@ -252,7 +252,9 @@ const factories = {
                     "fields":     p.callback(state, fields),
                     "timestamp":  FIREBASE_APP.database.ServerValue.TIMESTAMP,
                     "stream_id":  p.stream_id,
-                    "version":    EVENT_VERSION
+                    "version":    EVENT_VERSION,
+                    "seq":        state_store.seq
+
                 }
 
             return event;
@@ -611,13 +613,17 @@ function execute(p) {
         the generated events, but will never mutate it.
     */
     const state = (state_store[p.stream_id] !== undefined) ? state_store[p.stream_id] : {};
-
     const event = command(state, p);
+
+    state_store.seq += 1;
 
     return append_event_to_stream(event);
 };
 
-var state_store = {};
+/* Setting `seq` here to zero in case we want to start the DB from scratch. This way
+`execute()` won't crash after trying to save the first event.
+*/
+var state_store = { seq: 0 };
 
 /* TODO: outdated
    Purpose: (0) Rebuild in-memory ("state_store") and "/state" DB state
@@ -748,13 +754,13 @@ function apply() {
                                    check below will think that the very first event in each agggregate
                                    is alreay applied.
                                 */
-                                timestamp: 0
+                                // timestamp: 0
                             };
 
                     }
 
                     const stream_state  = state_store[stream_id];
-                    const stream_state_timestamp = stream_state.timestamp;
+                    // const stream_state_timestamp = stream_state.timestamp;
 
                     const event_handler = aggregates[event.aggregate]["event_handlers"][event.event_name];
 
@@ -776,14 +782,17 @@ function apply() {
                        `=` is needed becuause otherwise it will always replay the last event.
                        (Matching timestamps will evaluate `<` to false).
                     */
-                    if (event.timestamp <= stream_state_timestamp) {
-                        console.log(`${stream_id} ${event_id} do nothing (${event.timestamp}, ${stream_state_timestamp}) ${event.event_name}` );
+                    // if (event.timestamp <= stream_state_timestamp) {
+                    if (state_store.seq <= event.seq) {
+                        // console.log(`${stream_id} ${event_id} do nothing (${event.timestamp}, ${stream_state_timestamp}) ${event.event_name}` );
+                        console.log(`${stream_id} ${event_id} no op  (${event.seq}, ${state_store.seq}) ${event.event_name}` );
                         return;
                     } else {
-                        console.log(`${stream_id} ${event_id} replay     (${event.timestamp}, ${stream_state_timestamp}) ${event.event_name}` );
+                        // console.log(`${stream_id} ${event_id} replay (${event.timestamp}, ${stream_state_timestamp}) ${event.event_name}` );
+                        console.log(`${stream_id} ${event_id} replay (${event.seq}, ${state_store.seq}) ${event.event_name}` );
 
                         var stream_next_state = event_handler(event_snapshot, stream_state);
-                        stream_next_state["timestamp"] = event.timestamp;
+                        stream_next_state["seq"] = event.seq;
 
                         Object.assign(stream_state, stream_next_state);
                         FIREBASE_APP.database().ref("/state").child(stream_id).update(stream_state);
@@ -961,20 +970,21 @@ var f = require('./admin-functions.js');
 f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }});
 f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
 
-var elrodeos_streamid = "-LJyn38qc8u-_z9ofT4S";
+var elrodeos_streamid = "-LK-0GwEgg9Q8jM0HlTs";
 f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_email", payload: { email: "el@rod.eo" }});
 f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_email", payload: { email: "meg@egy.com" }});
 f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_phone_number", payload: {phone_number: "777"}});
+
 // TESTING ADDING AND REMOVING GROUPS
-f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_to_group", payload: {group: "admin"}});
-f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "remove_from_group", payload: {group: "admin"}});
+f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_to_group", payload: {group: "admins"}});
+f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "remove_from_group", payload: {group: "admins"}});
 
 var alvaros_streamid  = "-LJyn39J7jMGWMerGQjr";
 f.execute({stream_id: alvaros_streamid, aggregate: "people", commandString: "add_phone_number", payload: {phone_number: "111"}});
 
-var elrodeos_emailid = "-LJynZJrXCBuo0HFMB_4";
-f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "update_email", payload: { email: "el@rod.eo", event_id: elrodeos_emailid, reason: "testing"}});
+var elrodeos_emailid = "-LK-0S3L2r-FhzLyhUc8";
+f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "update_email", payload: { email: "EL@ROD.EO", event_id: elrodeos_emailid, reason: "testing"}});
 
-var elrodeos_phone_id = "-LJynZK2vtw5ZtydAMHh";
+var elrodeos_phone_id = "-LK-0S3rZapmu0lcv2Au";
 f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "update_phone_number", payload: { phone_number: "333", event_id: elrodeos_phone_id, reason: "testing"}});
 */
