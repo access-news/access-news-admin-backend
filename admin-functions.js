@@ -739,8 +739,7 @@ function apply() {
                        (Matching timestamps will evaluate `<` to false).
                     */
 
-                    console.log("Event timestamp in 'child_added' listener:");
-                    console.log(`===OUT=== ${event.timestamp}`);
+                    console.log(`${stream_id} ${event_id} ===OUT=== ${event.timestamp}`);
 
                     /* Hitting the EVENT_STORE again to get the finalized server
                         side timestamp of added event, because it is fun issuing
@@ -814,7 +813,6 @@ function apply() {
                        )
                     */
 
-                    console.log("Adding 'value' listener to event.");
                     const event_ref = event_store.child(event_id)
                     event_ref.on(
                         'value',
@@ -861,8 +859,7 @@ function apply() {
                             const event_timestamp =
                                 event_value_snapshot.val().timestamp;
 
-                            console.log("Event timestamp in extra 'value' listener:");
-                            console.log(`===IN=== ${event_timestamp}`);
+                            console.log(`${stream_id} ${event_id} ===IN=== ${event_timestamp}`);
 
                             if ( event_timestamp <= stream_state_timestamp ) {
                                 console.log(`${stream_id} ${event_id} no op  (${event_timestamp}, ${stream_state_timestamp}) ${event.event_name}` );
@@ -878,11 +875,12 @@ function apply() {
                                 event_ref.off();
                                 return;
                             } else {
-                                console.log(`${stream_id} ${event_id} latest: ${stream_state.latest_event_id} replay (${event_timestamp}, ${stream_state_timestamp}) ${event.event_name}` );
 
                                 var stream_next_state =  {};
 
                                 if ( event_id === stream_state.latest_event_id ) {
+
+                                    console.log(`replayDB ${stream_state} ${event.event_name}` );
 
                                     stream_next_state["timestamp"] = event_timestamp;
 
@@ -890,7 +888,10 @@ function apply() {
                                     FIREBASE_APP.database().ref("/state").child(stream_id).update(stream_state);
 
                                     event_ref.off();
+
                                 } else {
+
+                                    console.log(`replayMEM ${stream_state} ${event.event_name}` );
 
                                     stream_next_state =  event_handler(event_snapshot, stream_state);
 
@@ -1070,33 +1071,26 @@ module.exports = {
 
 /*
 var f = require('./admin-functions.js');
-f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }});
-f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
-f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }});
-f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
-f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }});
-f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
-f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }});
-f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
-f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }});
-f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
-f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }});
-f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
 
-var elrodeos_streamid = "-LK7oeTBeOzrG3MOjBvq";
-f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_email", payload: { email: "el@rod.eo" }});
-f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_email", payload: { email: "meg@egy.com" }});
-f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_phone_number", payload: {phone_number: "777"}});
+var elrodeo = f.create_new_stream_id();
+var alvaro  = f.create_new_stream_id();
+
+f.execute({stream_id: elrodeo, aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }}); null;
+f.execute({stream_id: alvaro, aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }}); null;
+
+f.execute({stream_id: elrodeo, aggregate: "people", commandString: "add_email", payload: { email: "el@rod.eo" }}); null;
+f.execute({stream_id: elrodeo, aggregate: "people", commandString: "add_email", payload: { email: "meg@egy.com" }}); null;
+f.execute({stream_id: elrodeo, aggregate: "people", commandString: "add_phone_number", payload: {phone_number: "777"}}); null;
+
 // TESTING ADDING AND REMOVING GROUPS
-f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_to_group", payload: {group: "admin"}});
-f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "remove_from_group", payload: {group: "admin"}});
+f.execute({stream_id: elrodeo, aggregate: "people", commandString: "add_to_group", payload: {group: "admin"}});
+f.execute({stream_id: elrodeo, aggregate: "people", commandString: "remove_from_group", payload: {group: "admin"}});
 
-var alvaros_streamid  = "-LJyn39J7jMGWMerGQjr";
-f.execute({stream_id: alvaros_streamid, aggregate: "people", commandString: "add_phone_number", payload: {phone_number: "111"}});
+f.execute({stream_id: alvaro, aggregate: "people", commandString: "add_phone_number", payload: {phone_number: "111"}});
 
 var elrodeos_emailid = "-LJynZJrXCBuo0HFMB_4";
-f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "update_email", payload: { email: "el@rod.eo", event_id: elrodeos_emailid, reason: "testing"}});
+f.execute({stream_id: elrodeo, aggregate: "people", commandString: "update_email", payload: { email: "el@rod.eo", event_id: elrodeos_emailid, reason: "testing"}});
 
 var elrodeos_phone_id = "-LJynZK2vtw5ZtydAMHh";
-f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "update_phone_number", payload: { phone_number: "333", event_id: elrodeos_phone_id, reason: "testing"}});
+f.execute({stream_id: elrodeo, aggregate: "people", commandString: "update_phone_number", payload: { phone_number: "333", event_id: elrodeos_phone_id, reason: "testing"}});
 */
