@@ -1,3 +1,5 @@
+Note to myself: **move from Firebase**.
+
 [c3e48ea6d9563300edd10bcbe28d41f8a2057b28](https://github.com/toraritte/Access-News-Admin/commit/c3e48ea6d9563300edd10bcbe28d41f8a2057b28)
 ----------------------------------------
 

@@ -672,9 +672,9 @@ function apply() {
                 function(event_snapshot) {
 
                     const event = event_snapshot.val();
-                    const stream_id = event.stream_id;
+                    const event_id = event_snapshot.key;
 
-                    const event_id = event_snapshot.ref.getKey();
+                    const stream_id = event.stream_id;
 
                     /* Get the event handler that should be used with the
                         current event.
@@ -720,44 +720,6 @@ function apply() {
                             execute(
                     */
 
-                    if (state_store[stream_id] === undefined) {
-                    /* Two cases when we can end up here:
-
-                        1. "/state" in DB is missing entirely, therefore condition will return
-                        `false` for every `stream_id`.
-
-                        2. The server was down while a new stream was started in the EVENT_STORE,
-                        therefore no listener was active to handle it, and events are flooding
-                        in upon restart.
-
-                        To jump start this process, a very minimal state-stub has to be supplied
-                        to allow applying events on top.
-
-                        The "aggregate"  attribute is  not queried  past this  point, but  it is
-                        needed. The  `aggregates.<type>.event_handlers` are only  concerned with
-                        the event's  "fields" object,  and the generated  "stream_next_state" is
-                        simply merged with the current state (adding or overwriting attributes).
-                        When the next event is fed  to `apply()`, it would query the "aggregate"
-                        attribute above, and if missing,  it would yield `undefined` when trying
-                        to find the right event handler, crashing the process.
-                    */
-                        state_store[stream_id] =
-                            {
-                                aggregate: event.aggregate,
-                                /* Setting timestamp to zero is necessary, otherwise the timestamp
-                                   check below will think that the very first event in each agggregate
-                                   is alreay applied.
-                                */
-                                timestamp: 0
-                            };
-
-                    }
-
-                    const stream_state  = state_store[stream_id];
-                    const stream_state_timestamp = stream_state.timestamp;
-
-                    const event_handler = aggregates[event.aggregate]["event_handlers"][event.event_name];
-
                     /* Comparing  the events'  and  the states'  timestamps,  to check  whether
                        events come in  in order, is unnecessary for reasons  below, but keeping
                        it, becuase if there is some state in the DB, the already applied events
@@ -776,18 +738,168 @@ function apply() {
                        `=` is needed becuause otherwise it will always replay the last event.
                        (Matching timestamps will evaluate `<` to false).
                     */
-                    if (event.timestamp <= stream_state_timestamp) {
-                        console.log(`${stream_id} ${event_id} do nothing (${event.timestamp}, ${stream_state_timestamp}) ${event.event_name}` );
-                        return;
-                    } else {
-                        console.log(`${stream_id} ${event_id} replay     (${event.timestamp}, ${stream_state_timestamp}) ${event.event_name}` );
 
-                        var stream_next_state = event_handler(event_snapshot, stream_state);
-                        stream_next_state["timestamp"] = event.timestamp;
+                    console.log("Event timestamp in 'child_added' listener:");
+                    console.log(`===OUT=== ${event.timestamp}`);
 
-                        Object.assign(stream_state, stream_next_state);
-                        FIREBASE_APP.database().ref("/state").child(stream_id).update(stream_state);
-                    }
+                    /* Hitting the EVENT_STORE again to get the finalized server
+                        side timestamp of added event, because it is fun issuing
+                        multiple network requests to get the same value.
+
+                        The reason:
+                        https://stackoverflow.com/questions/51867616/how-to-come-around-firebase-realtime-databases-server-side-timestamp-volatility
+                    */
+                    /* Listeners will get accumulated fairly quickly with each new event,
+                       therefore if timestamps-check hits the no-op branch, remove them.
+                       (Which would happen when the server is restarted only...
+
+                       The `on('child_added')` listener also supplies the previous event's
+                       key, and that can be used to remove the previous listeners.
+                       DOES NOT WORK: If events come in fast enough,
+                                      there will be a race condition.
+                                      All hail systems distribution.
+
+                        timestamps * toraritte@irene  [~/Downloads/Access-News-Admin]
+                        0 [09:07:17] node
+                        > var f = require('./admin-functions.js');
+                        undefined
+                        > f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last
+                        _name: "Rodeo" }});
+                        ===OUT=== 1534522058599
+                        ===IN=== 1534522058599
+                        -LK7d5SVcF5J-63i89dr -LK7d5SZO0NelZZhcm1g replay     (1534522058599, 0) person_added
+                        Promise {
+                        <pending>,
+                        domain:
+                        Domain {
+                            domain: null,
+                            _events: { error: [Function: debugDomainError] },
+                            _eventsCount: 1,
+                            _maxListeners: undefined,
+                            members: [] } }
+                        > ===IN=== 1534522058690
+                        -LK7d5SVcF5J-63i89dr -LK7d5SZO0NelZZhcm1g replay     (1534522058690, 1534522058599) person_added
+                        > f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last
+                        _name: "Varo" }});
+                        ===OUT=== 1534522071734
+                        ===IN=== 1534522071734
+                        -LK7d8enxpXLwr3I_hLY -LK7d8eoGVFY_v88DiEX replay     (1534522071734, 0) person_added
+                        Promise {
+                        <pending>,
+                        domain:
+                        Domain {
+                            domain: null,
+                            _events: { error: [Function: debugDomainError] },
+                            _eventsCount: 1,
+                            _maxListeners: undefined,
+                            members: [] } }
+                        > ===IN=== 1534522071826
+                        -LK7d8enxpXLwr3I_hLY -LK7d8eoGVFY_v88DiEX replay     (1534522071826, 1534522071734) person_added
+
+                        (To exit, press ^C again or type .exit)
+                        >
+                        timestamps * toraritte@irene  [~/Downloads/Access-News-Admin]
+                        0 [09:07:54] node
+                        > var f = require('./admin-functions.js');
+                        undefined
+                        > ===OUT=== 1534522058690
+                        ===IN=== 1534522058690
+                        -LK7d5SVcF5J-63i89dr -LK7d5SZO0NelZZhcm1g do nothing (1534522058690, 1534522058690) person_added
+                        ===OUT=== 1534522071826
+                        ===IN=== 1534522071826
+                        -LK7d8enxpXLwr3I_hLY -LK7d8eoGVFY_v88DiEX do nothing (1534522071826, 1534522071826) person_added
+
+                        (To exit, press ^C again or type .exit)
+
+                       )
+                    */
+
+                    console.log("Adding 'value' listener to event.");
+                    const event_ref = event_store.child(event_id)
+                    event_ref.on(
+                        'value',
+                        function(event_value_snapshot){
+
+                            if (state_store[stream_id] === undefined) {
+                            /* Two cases when we can end up here:
+
+                                1. "/state" in DB is missing entirely, therefore condition will return
+                                `false` for every `stream_id`.
+
+                                2. The server was down while a new stream was started in the EVENT_STORE,
+                                therefore no listener was active to handle it, and events are flooding
+                                in upon restart.
+
+                                To jump start this process, a very minimal state-stub has to be supplied
+                                to allow applying events on top.
+
+                                The "aggregate"  attribute is  not queried  past this  point, but  it is
+                                needed. The  `aggregates.<type>.event_handlers` are only  concerned with
+                                the event's  "fields" object,  and the generated  "stream_next_state" is
+                                simply merged with the current state (adding or overwriting attributes).
+                                When the next event is fed  to `apply()`, it would query the "aggregate"
+                                attribute above, and if missing,  it would yield `undefined` when trying
+                                to find the right event handler, crashing the process.
+                            */
+                                state_store[stream_id] =
+                                    {
+                                        aggregate: event.aggregate,
+                                        /* Setting timestamp to zero is necessary, otherwise the timestamp
+                                        check below will think that the very first event in each agggregate
+                                        is alreay applied.
+                                        */
+                                        timestamp: 0
+                                    };
+
+                            }
+
+                            const stream_state  = state_store[stream_id];
+                            const stream_state_timestamp = stream_state.timestamp;
+
+                            const event_handler = aggregates[event.aggregate]["event_handlers"][event.event_name];
+
+                            const event_timestamp =
+                                event_value_snapshot.val().timestamp;
+
+                            console.log("Event timestamp in extra 'value' listener:");
+                            console.log(`===IN=== ${event_timestamp}`);
+
+                            if ( event_timestamp <= stream_state_timestamp ) {
+                                console.log(`${stream_id} ${event_id} no op  (${event_timestamp}, ${stream_state_timestamp}) ${event.event_name}` );
+                                /* WORKS, but the issue is that this will only get invoked when
+                                   the server restarts, and checks for replayable events.
+                                   (See console logs right before the `on('value')` listener.)
+
+                                   The easiest way to test this:
+                                   1. Add some events.
+                                   2. Delete one of the added events.
+                                   3. See errors, as the value listener was never detached.
+                                */
+                                event_ref.off();
+                                return;
+                            } else {
+                                console.log(`${stream_id} ${event_id} latest: ${stream_state.latest_event_id} replay (${event_timestamp}, ${stream_state_timestamp}) ${event.event_name}` );
+
+                                var stream_next_state =  {};
+
+                                if ( event_id === stream_state.latest_event_id ) {
+
+                                    stream_next_state["timestamp"] = event_timestamp;
+
+                                    Object.assign(stream_state, stream_next_state);
+                                    FIREBASE_APP.database().ref("/state").child(stream_id).update(stream_state);
+
+                                    event_ref.off();
+                                } else {
+
+                                    stream_next_state =  event_handler(event_snapshot, stream_state);
+
+                                    stream_next_state["latest_event_id"] = event_id;
+                                    Object.assign(stream_state, stream_next_state);
+                                }
+                            }
+                        }
+                    );
                 }
             );
         }
@@ -960,8 +1072,18 @@ module.exports = {
 var f = require('./admin-functions.js');
 f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }});
 f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
+f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }});
+f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
+f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }});
+f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
+f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }});
+f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
+f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }});
+f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
+f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }});
+f.execute({stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
 
-var elrodeos_streamid = "-LJyn38qc8u-_z9ofT4S";
+var elrodeos_streamid = "-LK7oeTBeOzrG3MOjBvq";
 f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_email", payload: { email: "el@rod.eo" }});
 f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_email", payload: { email: "meg@egy.com" }});
 f.execute({stream_id: elrodeos_streamid, aggregate: "people", commandString: "add_phone_number", payload: {phone_number: "777"}});
