@@ -615,6 +615,73 @@ function execute(p) {
     return append_event_to_stream(event);
 };
 
+/* On success: returns Promise containing non-null admin.auth.UserRecord. */
+/* TODO Make this a transaction.
+
+        It is  nice that the  promise chaining below  ensures the
+        sequence of commands, but if one fails, the chain breaks,
+        but  what has  been done  will not  get undone.  This may
+        not  be  an  issue  because of  command  idempotency  and
+        EVENT_STORE immutability, but may be nicer.
+
+        ! Checks  for ALL  commands participating  in a  public
+        ! command  should  be  done  beforehand so  as  not  to
+        ! pollute  the  EVENT_STORE  with balancing  events  if
+        ! params are not good.
+*/
+function chain(p) {
+    /* p = {
+               stream_id: "stream_id",
+               aggregate: "people",
+               start_seq: 1,
+                           ---command---  ---payload-------------
+               commands:  [["add_person", { first_name: .., ...], [...], ... ]
+           }
+    */
+
+    const first_execute_params =
+        {
+            stream_id:     p.stream_id,
+            aggregate:     p.aggregate,
+            commandString: p.commands[0][0],
+            payload:       p.commands[0][1],
+            seq:           p.start_seq
+        }
+
+    p.commands.shift();
+
+    const first_execute_promise = execute(first_execute_params);
+
+    function add_then(promise, commands_array) {
+
+        p.start_seq += 1;
+        const seq = p.start_seq;
+
+        const command = commands_array.shift();
+
+        const new_promise =
+            promise.then(function() {
+                execute(
+                    {
+                        stream_id: p.stream_id,
+                        aggregate: p.aggregate,
+                        commandString: command[0],
+                        payload:       command[1],
+                        seq:       seq
+                    }
+                )
+            });
+
+        if ( commands_array.length === 0 ) {
+            return new_promise;
+        } else {
+            return add_then(new_promise, commands_array);
+        }
+    }
+
+    return add_then(first_execute_promise, p.commands);
+}
+
 var state_store = {};
 
 /* TODO: outdated
@@ -824,6 +891,7 @@ function apply() {
         }
     )
 }
+apply();
 
 /* TODO: More robust way to keep state.
 
@@ -871,7 +939,7 @@ const public_commands = {
            (REQUIRED) first_name: "",
            (REQUIRED) last_name:  "",
                       username:   "", // "first_name" + "last_name" by default
-           (REQUIRED) user_id:    "", // i.e., person stream_id
+           // (REQUIRED) user_id:    "", // i.e., person stream_id
            (REQUIRED) email:      "",
                       address:    "",
                       phone_number: "",
@@ -892,97 +960,38 @@ const public_commands = {
                security rules.
     */
 
-        const p_keys = Object.keys(p);
-        p_keys.forEach(
-            function(param) {
-                if (p[param] === undefined) {
-                    throw `Required keys: ${p_keys}`
-                }
-            }
-        );
-
-        function make_execute_object(o) {
-
-            const p =
-                {
-                    user_id: create_new_stream_id(),
-                    aggregate: "people"
-                };
-
-         return Object.assign(p, o);
-        }
-
         // TODO create a function for optional parameter checks
         if (p.username === undefined) {
             p["username"] = `${p.first_name} ${p.last_name}`;
         }
 
-        /* On success: returns Promise containing non-null admin.auth.UserRecord. */
+        const group_commands = p.account_types.map(
+            function(group) {
+                return [ "add_to_group", { group: `${group}s` }];
+            }
+        );
 
-        /* TODO Make this a transaction.
+        const user_id = create_new_stream_id();
 
-                It is  nice that the  promise chaining below  ensures the
-                sequence of commands, but if one fails, the chain breaks,
-                but  what has  been done  will not  get undone.  This may
-                not  be  an  issue  because of  command  idempotency  and
-                EVENT_STORE immutability, but may be nicer.
-
-                ! Checks  for ALL  commands participating  in a  public
-                ! command  should  be  done  beforehand so  as  not  to
-                ! pollute  the  EVENT_STORE  with balancing  events  if
-                ! params are not good.
-        */
-        return execute(
-            make_execute_object(
-                {
-                    commandString: "add_person",
-                    payload: {
+        return chain(
+            {
+                stream_id: user_id,
+                aggregate: "people",
+                start_seq: 1,
+                commands:  [
+                    [ "add_person", {
                         "first_name": p.first_name,
                         "last_name":  p.last_name
-                    }
-                }
-            )
-        ) .then( function() {
-
-            execute(
-                make_execute_object(
-                    {
-                        commandString: "add_email",
-                        payload: { "email": p.email }
-                    }
-                )
-            );
-        }).then( function() {
-
-            execute(
-                make_execute_object(
-                    {
-                        commandString: "add_phone_number",
-                        payload: { "phone_number": p.phone_number }
-                    }
-                )
-            )
-        }).then( function() {
-
-            account_types.forEach(
-                /* TODO Make this loop a transaction.
-
-                        Right now  it will throw  error when one of  the provided
-                        groups does not exist,  making the previous ones succeed,
-                        but end abruptly at the wrong one.
-                */
-                function(group) {
-                    execute(
-                        make_execute_object(
-                            {
-                                command: "add_to_group",
-                                payload: { "group": `${p.account_types}s` }
-                            },
-                        )
-                    )
-                }
-            );
-        }).then( function() {
+                    }],
+                    [ "add_email",{
+                        "email": p.email
+                    }],
+                    // [ "add_phone_number",{
+                    //     "phone_number": p.phone_number
+                    // }]
+                ].concat(group_commands)
+            }
+        ).then( function() {
 
             FIREBASE_APP.auth().createUser(
                 {
@@ -990,7 +999,7 @@ const public_commands = {
                     "displayName": p.username,
                     "email":       p.email,
                     "phoneNumber": p.phone_number,
-                    "uid":         person.stream_id
+                    "uid":         user_id
                 }
             )
         })
@@ -1008,6 +1017,7 @@ module.exports = {
     aggregates,
     execute,
     apply,
+    chain,
     state_store,
     public_commands
 };
