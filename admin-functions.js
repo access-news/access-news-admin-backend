@@ -993,7 +993,7 @@ const public_commands = {
             }
         ).then( function() {
 
-            FIREBASE_APP.auth().createUser(
+            return FIREBASE_APP.auth().createUser(
                 {
                     "disabled":    false,
                     "displayName": p.username,
@@ -1002,7 +1002,14 @@ const public_commands = {
                     "uid":         user_id
                 }
             )
-        })
+        }).then( function() {
+
+            return init_firebase_client().auth().sendPasswordResetEmail(p.email);
+
+        }).catch( function(e) {
+
+            console.log(e)
+        });
     },
 }
 
