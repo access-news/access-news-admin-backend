@@ -891,7 +891,7 @@ function apply() {
         }
     )
 }
-apply();
+// apply();
 
 /* TODO: More robust way to keep state.
 
