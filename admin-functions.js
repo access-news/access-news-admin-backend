@@ -1,8 +1,53 @@
 'use strict'
+/* Sequence numbers (`seq`) in events and state
+   ============================================
+
+   --- STATUS: **empty database** ---
+
+   After `require`ing this file, `apply()` is immediately invoked
+
+   1. fetching the current state from the database
+      (which yields `undefined`) and
+
+   2. attaching an `on('child_added',...)` listener on the "/event_store"
+      (mutating the state based on incoming events).
+
+   New events are generated via the  `execute()` command. On the very first
+   command there is only an empty  STATE_STORE, and the stream's state thus
+   will be a  stub (`{seq: 0}`). The event generated  by the command (e.g.,
+   "add_person") takes the current state of  the stream and saves its `seq`
+   incremented by one.
+
+   E      - `execute()`
+   e{num} - event with `seq === num`
+   S{num} - stream's state with its `seq` attribute being `num`.
+   A      - `apply()`
+
+              EVENT_STORE                            STATE_STORE
+   S0 -> E ->    e1       -> A( e1 <= S0) -> false ->    S1
+   S1 -> E ->    e2       -> A( e2 <= S1) -> false ->    S2
+
+   When STATE_STORE is deleted or unreachable, the in-memory STATE_STORE
+   will be rebuilt the same way when the server is restarted.
+
+
+   --- STATUS: **Server stopped, new events came in (e3, e4), server restarted** ---
+
+              EVENT_STORE                                      STATE_STORE
+   S2 -> E ->    e1       -> A( e1 <= S2 ) -> true  -> no op ->    S2
+   S2 -> E ->    e2       -> A( e2 <= S2 ) -> true  -> no op ->    S2
+   S2 -> E ->    e3       -> A( e3 <= S2 ) -> false ->             S3
+   S3 -> E ->    e4       -> A( e4 <= S3 ) -> false ->             S4
+
+*/
 
 /* SETUP
 
    https://medium.com/scientific-breakthrough-of-the-afternoon/sending-password-reset-email-after-user-has-been-created-with-firebase-admin-sdk-node-js-1998a2c6eecf
+*/
+
+/* INITIALIZING FIREBASE APPS
+   ==========================
 */
 
 function init_firebase_admin() {
@@ -18,6 +63,8 @@ function init_firebase_admin() {
     return firebase_admin;
 };
 
+const ADMIN_APP = init_firebase_admin();
+
 function init_firebase_client() {
 
     const firebase_client = require('firebase');
@@ -27,420 +74,375 @@ function init_firebase_client() {
     return firebase_client;
 };
 
-var FIREBASE_APP = init_firebase_admin();
+const CLIENT_APP = init_firebase_client();
 
-/* ADMIN COMMANDS */
-
-/* 0. Event creation helpers */
-
-/* General structure of events:
-
-                                    ----- event object ------
-    event_store/stream_id/event_id/{event_name,...fields...},timestamp,version,seq
-
-    stream_id: unique identifier of the aggregate instance (such as user_id,
-                category_id etc.). Basically an entity that should have its
-                own identity in the system.
-
-                For example, categories and publications have their own streams,
-                as we need to track them, even if a publication has no content
-                (i.e., recordings) yet. Groups on the other hand are tracked
-                with a person's stream because they always have users, and
-                introducing a new group should have a purpose, and therefore
-                initial users.
-
-                Ignored, when seq===0
-
-    seq: "expected_version" in other event store implementations, but I
-            think that name is misleading, especially if one tries to version
-            their events. It is a sequential number for every event in the
-            stream that, denoting chronological sequence.
-
-            Calling the function with seq===0 implies the start of a new stream.
+/* LOW LEVEL FUNCTIONS TO THE EVENT_STORE
+   ======================================
 */
+/* General outline of the database
+   -------------------------------
 
-/* DROPPING SEQ (may regret it soon after)
-
-    I don't really know how to enqueue events headed to the store to enforce
-    order, but every event has a push ID (client side date) and a server
-    timestamp. These are not infallible though, so I will plan for best effort
-    for now.
+    /event_store/event_id/event_object
+    /streams/stream_id/event_id/event_object
+    /state_store/stream_id/latest_values_of_event_fields
 */
 
 var EVENT_VERSION = 0;
 
-function create_new_stream_id() {
-    return FIREBASE_APP.database().ref("/streams").push().key;
+function create_event(p) {
+
+    /* This function's only purpose is to make testing easier and enforce fields. */
+
+    /* The "p" (as in "parameters") object:
+
+       "aggregate": From Domain Driven Design. An aggregate is an entity
+                    that should have its own identity in the system.
+
+       "stream_id": Unique identifier of the aggregate instance (such as
+                    user_id).
+
+                    For  example,  PUBLICATIONS  should be  an  distinct
+                    aggregate, becuase even if no content exists yet, we
+                    should track when they  were officially added. (This
+                    may change of course.)
+
+       "event_name": Verb in  the past tense, describing  what this event
+                     adds to the history of the aggregate instance.
+
+       "fields": The data to be persisted with an event. For example,
+                 "email_added"  would   persist  the   email  address
+                 associated with a person.
+
+       "version": The EVENT_STORE is immutable, therefore the change of
+                  a particular event should be marked. There are many
+                  [event versioning strategies](https://leanpub.com/esversioning/read), and at this point it is
+                  just used to enable future extensions.
+
+       "seq": "expected_version" in other  event store implementations,
+              but  I  think  that  name is  misleading,  especially  if
+              one  versions their  events.  It is  a sequential  number
+              for  every event  in  the  stream denoting  chronological
+              sequence.
+
+              Comparing   timestamps  would   probably   be  a   viable
+              alternative,  but  not  used  in  this  project  for  the
+              following reasons:
+
+                + The way Firebase databases' server-side timestamps are implemented,
+                  it is not an option. See more [here](https://stackoverflow.com/questions/51867616/how-to-come-around-firebase-realtime-databases-server-side-timestamp-volatility).
+
+                + To avoid race conditions and make it easier to reason about concurrent
+                  events in a highly distributed system, it is easier to explicitly
+                  require sequence numbers. (Maybe not, time will tell.)
+    */
+
+    return {
+        "aggregate":  p.aggregate,
+        "stream_id":  p.stream_id,
+        "event_name": p.event_name,
+        "fields":     p.fields,
+        "timestamp":  ADMIN_APP.database.ServerValue.TIMESTAMP,
+        "version":    EVENT_VERSION,
+        "seq":        p.seq
+    };
+
 }
 
-/* ISSUE #2
-   Function name is misleading because it also saves events to
-   `/events`. Wanted to use the `Reference.update()` transaction,
-   hence the reason why didn't just create another function.
+function create_new_stream_id() {
+    return ADMIN_APP.database().ref("/streams").push().key;
+}
 
-   Another option would've been to add it to apply, but this is
-   the right place to put it logically, when the event is created
-   in `execute()`.
+/* "stream_id" is also contained by the event, but I think it is more prudent
+   to expose it in here as well. (Especially when seeing the name of the
+   function, and `execute()` explicitly requires "stream_id" anyway.)
 */
-function append_event_to_stream(event) {
+function append_event_to_stream(stream_id, event) {
 
-    /* For my future self: "stream_id" is added to the event,
-       when the event is created in `Factories.command`.
-    */
-    const db = FIREBASE_APP.database();
+    const db = ADMIN_APP.database();
     const event_id = db.ref("event_store").push().key;
 
     var updates = {};
-    updates[`/streams/${event.stream_id}/${event_id}`] = event;
+    updates[`/streams/${stream_id}/${event_id}`] = event;
     updates[`/event_store/${event_id}`] = event;
 
+    /* `firebase.database.Reference.update()` returns a void promise,
+       that is used to synchronize writes in `public_commands`, such
+       as `add_user()`.
+    */
     return db.ref().update(updates);
 };
 
-/* Generate meaningful errors */
-function verify_payload_fields(o) {
+/* HELPERS FOR `EXECUTE()` AND `APPLY()`
+   =====================================
+*/
 
-    /* {
-           required_fields: [ "prop1", ..., "propN"],
-           payload:         { field: "val", ... }
-       }
+/* Used in commands to verify required fields. A very primitive version of
+   `cast()` in Ecto Changeset for Elixir applications.
+*/
+function verify_payload_fields(p) {
+
+    /* The "p" (as in "parameters") object:
+
+       "required_fields": Array of event fields. For example,
+                          `[ "first_name", "last_name"]` for "add_person".
+
+       "payload": An object holding the values for to be held by the event
+                  emitted by the command. For "add_person", it would be
+                  `{ first_name: "Lo", last_name: "Fa"}`.
     */
 
     var fields = {};
 
-    const payload_properties = Object.keys(o.payload);
+    const payload_properties = Object.keys(p.payload);
 
-    if (payload_properties.length !== o.required_fields.length) {
-        throw `Expected fields: ${o.required_fields}, got: ${payload_properties}`
+    if (payload_properties.length !== p.required_fields.length) {
+        throw `Expected fields: ${p.required_fields}, got: ${payload_properties}`
     }
 
     for (var i in payload_properties) {
 
         const payload_prop = payload_properties[i];
 
-        if (o.required_fields.includes(payload_prop) === false) {
-            throw `Required fields ${o.required_fields} do not match ${payload_prop}`
+        if (p.required_fields.includes(payload_prop) === false) {
+            throw `Required fields ${p.required_fields} do not match ${payload_prop}`
         }
 
-        fields[payload_prop] = o.payload[payload_prop];
+        fields[payload_prop] = p.payload[payload_prop];
     }
 
     return fields;
 }
 
-/* 1. Aggregate and helpers */
+const event_handler_factories = {
 
-const factories = {
+    /* Attribute of a "state" (i.e., cumulative state of an aggregate
+       instance)  in  the  STATE_STORE.   Events  contain  one  datum
+       (usually),  such as  "email_added"  has an  "email" field  for
+       example. But a person can have more email addresses associated
+       to  them,  hence  the aggregate  instance's  cumulative  state
+       should reflect this,  thus it would be called  "emails" in the
+       STATE_STORE.
 
-    event_handlers: {
+        The "p" (as in "parameters") object in the factories below it
+        therefore mostly to make pluralization rules explicit:
 
-        /* Factories with "multi" in their name are for attributes (value objects
-        in DDD?), that can have multiple values simultaneously. For example,
-        a person can have multiple email addresses, phone numbers etc. These
-        require extra checks than singular ones, for example a person's name,
-        where changing it simply overwrites the current value.
-        */
+        "attribute": The plural name of the attribute in the state.
 
-        add_for_multi: function(o) {
-            /* o =
-                {
-                    state_attribute: "emails", // state: aggregate instance's state
-                    event_field:     "email"
-                }
-            */
+        "event_field": The singular event field name for the datum.
+    */
 
-            return new Function("event_snapshot", "stream_state",
-                    `
-                    const event    = event_snapshot.val();
-                    const event_id = event_snapshot.ref.getKey();
+    /* "state" = the cumulative state of an aggregate instance. */
 
-                    // Check if any emails have been added previously
-                    if (stream_state["${o.state_attribute}"] === undefined) {
-                        stream_state["${o.state_attribute}"] = {};
-                        stream_state["${o.state_attribute}"][event_id] = event["fields"]["${o.event_field}"];
-                    } else {
-                        var update = {};
-                        update[event_id] = event["fields"]["${o.event_field}"];
-                        Object.assign(stream_state["${o.state_attribute}"] , update);
-                    };
+    /* NOTE:
+       It could be that the  same entity (e.g., phone number) belongs
+       to multiple  people, but using  a `push()` ID they  are unique
+       values that  can be traced  back to individuals. On  the other
+       hand, a projection  can be built to track how  many people are
+       using the same contact details (i.e., same address, same phone
+       number, email, etc.).
+    */
 
-                    // Return the mutated state.
-                    return stream_state;
-                    `)
-        },
+    add_for_multi: function(p) {
 
-        update_for_multi: function(o) { /* See `o`'s description at `add_for_multi` */
+        return new Function("event_snapshot", "state",
+                `
+                const event    = event_snapshot.val();
+                const event_id = event_snapshot.ref.getKey();
 
-            return new Function("event_snapshot", "stream_state",
-                    `
-                    const event = event_snapshot.val();
-                    stream_state["${o.state_attribute}"][event.fields.event_id] = event["fields"]["${o.event_field}"];
+                // Check if any emails have been added previously
+                if (state["${p.attribute}"] === undefined) {
+                    state["${p.attribute}"] = {};
+                    state["${p.attribute}"][event_id] = event["fields"]["${p.event_field}"];
+                } else {
+                    var update = {};
+                    update[event_id] = event["fields"]["${p.event_field}"];
+                    Object.assign(state["${p.attribute}"] , update);
+                };
 
-                    return stream_state;
-                    `)
-        },
-
-        delete_for_multi: function(o) { /* See `o`'s description at `add_for_multi` */
-
-            /* o = { state_attribute: "emails" } */
-
-            return new Function("event_snapshot", "stream_state",
-                    `
-                    const event = event_snapshot.val();
-
-                    stream_state["${o.state_attribute}"][event.fields.event_id] = null;
-
-                    return stream_state;
-                    `)
-        },
+                // Return the mutated state.
+                return state;
+                `)
     },
 
-    command: function(params) {
-        /* p =
-            {
-                event_name:      'email_added',
-                required_fields: ['email'],
-                constraint:      callback taking "params" (see "add_to_group" for an example)
-            }
-        */
+    update_for_multi: function(p) {
 
-        return function(stream_state, p) {
+        return new Function("event_snapshot", "state",
+                `
+                const event = event_snapshot.val();
+                state["${p.attribute}"][event.fields.event_id] = event["fields"]["${p.event_field}"];
 
-            /* The `p` object is handed down from execute:
-                {
-                    stream_id:     "stream_id",
-                    aggregate:     "people",
-                    commandString: "person_added",
-                    payload:       { last_name: "Al", first_name:  "Varo"},
-                    callback:      extra_logic // function for extra constraints in the command
-                }
-            */
-
-            const fields =
-                verify_payload_fields(
-                    {
-                        "required_fields": params.required_fields,
-                        "payload": p.payload
-                    },
-                );
-
-            if (params.constraint !== undefined) {
-                params.constraint(fields);
-            }
-
-            /* The "callback" parameter is to include any logic that
-                needs to be enforced, and either throw error(s) or
-                create the appropriate event.
-
-                If none is provided, it will simple return the "fields"
-                parameter unchanged.
-            */
-            if (p.callback === undefined) {
-                p.callback = function(stream_state, fields) { return fields };
-            }
-
-            const event =
-                {
-                    "aggregate":  p.aggregate,
-                    "event_name": params.event_name,
-                    "fields":     p.callback(stream_state, fields),
-                    "timestamp":  FIREBASE_APP.database.ServerValue.TIMESTAMP,
-                    "stream_id":  p.stream_id,
-                    "version":    EVENT_VERSION,
-                    "seq":        p.seq
-
-                }
-
-            return event;
-        };
+                return state;
+                `)
     },
 
-};
+    delete_for_multi: function(p) {
+
+        /* "p" here only requires an "attribute" field here (e.g.,
+            `{ attribute: "emails" }`), becuase the function will
+            delete one value from the attribute.
+        */
+
+        return new Function("event_snapshot", "state",
+                `
+                const event = event_snapshot.val();
+
+                state["${p.attribute}"][event.fields.event_id] = null;
+
+                return state;
+                `)
+    },
+}
+
+function command_factory(p) {
+
+    /* The "p" (as in "parameters") object:
+
+           "event_name": E.g., 'email_added'
+
+           "required_fields": First input for `verify_payload_fields()`
+                              (see comments there).
+
+           "constraint": Callback   taking    the   fields    returned   from
+                         `verify_payload_fields()`  and  it  return  nothing,
+                         only throws if some domain logic is not honoured.
+
+                         See "add_to_group"  for an example,  where arbitrary
+                         strings can  be supplied, but the  only valid groups
+                         are "admins", "readers", and "listeners".
+    */
+
+    return function(state, execute_params) {
+
+        /* The `execute_params` object is the usual "p" object in functions,
+           handed down from `execute()`:
+
+               "aggregate" \
+               "stream_id"  > see `create_event()`'s "p" object comments.
+               "seq"       /
+
+               "commandString": E.g., "person_added".
+
+               "payload": Second input for `verify_payload_fields()`
+                           (see comments there).
+
+               "callback": Function for adding constraints to a command.
+                           Currently nothing uses it.
+        */
+
+        const fields =
+            verify_payload_fields({
+                    "required_fields": p.required_fields,
+                    "payload": execute_params.payload
+                });
+
+        if (p.constraint !== undefined) {
+            p.constraint(fields);
+        }
+
+        /* The "callback" parameter is to include any logic that
+            needs to be enforced, and either throw error(s) or
+            create the appropriate event.
+
+            If none is provided, it will simple return the "fields"
+            parameter unchanged.
+        */
+        if (execute_params.callback === undefined) {
+            execute_params.callback = function(state, fields) { return fields };
+        }
+
+        return create_event({
+                "aggregate":  execute_params.aggregate,
+                "stream_id":  execute_params.stream_id,
+                "event_name": p.event_name,
+                "fields":     execute_params.callback(state, fields),
+                "timestamp":  ADMIN_APP.database.ServerValue.TIMESTAMP,
+                "version":    EVENT_VERSION,
+                "seq":        execute_params.seq
+            });
+    };
+}
+
+/* COMMANDS (for `execute()`) AND EVENT HANDLERS (for `apply()`)
+   =============================================================
+*/
+
+function group_constraint(fields) {
+
+    const valid_groups = ['admins', 'listeners', 'readers'];
+
+    if (valid_groups.includes(fields.group) !== true) {
+        throw `"group" must be one of ${valid_groups}`
+    }
+}
 
 const aggregates = {
 
-        /* `new_instance()` only creates the initial state object to be fed
-           to `execute()`. The latter will generate an EVENT in turn, saves
-           it to the EVENT_STORE. This will trigger the appropriate `apply()`
-           function, corresponding to the EVENT TYPE, generate the NEXT STATE,
-           and update the STATE_STORE (both in DB and in memory).
-
-           (The "current_state" in `execute()` is only used for getting the
-            aggregate type and stream_id, at least for now. It should be the
-            place to enforce business/domain rules. This is still a gray area
-            for me, but the UI/API would/should take care of this part. For
-            example, in order to avoid duplicate emails/phones/etc for a user,
-            make the UI so that the user sees that the current values first,
-            and checks can be included there too.)
-
-           ```
-                                                   ____________
-                                                  /            \
-                                                 |              |
-                                                 V              |
-                                              ___ _             |
-                                             /     \            |
-           aggregates.<type>.( new_instance | look_up )         |
-           |          _________/                /     |         |
-           |         /                         /      |         |
-           |     NEW_STATE                    /       |         |
-           |      |    |                     /        |         |
-           |      V    |                    /         |         |
-           |    STATE  |              STATE_STORE     |         |
-           |    STORE  |                /             |         |
-           |           |       ________/              |         |
-           |            \     /                       |         |
-           |             \   /                        |         |
-           \______________\ /_________________________/         |
-                           |                                    |
-                           |                                    |
-                           V                                    |
-           execute( current_state, COMMAND )                    |
-           \_____________________   ______/                     |
-                                  |                             |
-                                  V                             |
-                                EVENT                           |
-                                  |                             |
-                                  V                             |
-                             EVENT_STORE                        |
-                                  |                             |
-                                  V                             |
-                            `on()` LISTENER                     |
-                                  |                             |
-                                  V                             |
-           apply( current_state, EVENT )                        |
-           \___________   ____________/                         |
-                        |                                       |
-                        |                                       |
-                        V                                       |
-                    NEXT_STATE                                  |
-                        |                                       |
-                        V                                       |
-                   STATE_STORE (in-memory)                      |
-                        |                                       |
-                        V                                       |
-                   /STATE (Firebase Realtime DB)                |
-                        |                                       |
-                        |_______________________________________|
-        */
-
     people: {
 
-        /* Why the stream_id shouldn't be mentioned here and why `create_new_stream_id()`
-           should also be invoked somewhere else.
-           ==========================================================================
-           This function only provides a state stub for an aggregate instance to get
-           things going.
-
-           In `execute()`s, when no "stream_id" is supplied, it means that it will
-           kick off a brand new stream, and the STATE_STORE also has no entry for
-           that stream's state. The aggregate-specific `execute()`s will take care
-           of creating a new "stream_id" in these cases, but to get to the first
-           event, this very basic object needs to be set up: `apply()` is aggregate
-           agnostic thus it will need some info on the context to invoke the right
-           event handlers, such as
-
-            + the aggregate type the event belongs to or
-
-            + the timestamp,
-        */
-
-        // Use commands to store domain/business logic (i.e., to enforce them).
         commands: {
 
             "add_person":
-                factories.command({
+                command_factory({
                     event_name:      'person_added',
                     required_fields: ['first_name', 'last_name']
                 }),
 
             "change_name":
-                factories.command({
+                command_factory({
                     event_name:      'person_name_changed',
                     required_fields: ['first_name', 'last_name', 'reason']
                 }),
 
             "add_email":
-                factories.command({
+                command_factory({
                     event_name:      'email_added',
                     required_fields: ['email'],
                 }),
 
             "update_email":
-                factories.command({
+                command_factory({
                     event_name:      'email_updated',
                     required_fields: ['email', 'event_id', 'reason'],
                 }),
 
             "delete_email":
-                factories.command({
+                command_factory({
                     event_name:      'email_deleted',
                     // Technically 'email' is not required, but nice to avoid an extra lookup
                     required_fields: ['email', 'event_id', 'reason']
                 }),
 
             "add_phone_number":
-                factories.command({
+                command_factory({
                     event_name:      'phone_number_added',
                     required_fields: ['phone_number'],
                 }),
 
             "update_phone_number":
-                factories.command({
+                command_factory({
                     event_name:      'phone_number_updated',
                     required_fields: ['phone_number', 'event_id', 'reason'],
                 }),
 
             "delete_phone_number":
-                factories.command({
+                command_factory({
                     event_name:      'phone_number_deleted',
                     // Technically 'phone_number' is not required, but nice to avoid an extra lookup
                     required_fields: ['phone_number', 'event_id', 'reason']
                 }),
 
-            /* TODO (?): "event_name" could be a template closure to allow
-                         dynamic event creation. For example, based on the
-                         "group" field, the event could be "added_to_admins",
-                         "added_to_listeners" etc.
-
-                         But then again, too much magic can be harmful. This
-                         way we know exactly that group membership has been
-                         granted.
-
-                         Also, similar commands could also be refactored
-                         (such as "add_email", "update_email", "delete_email"
-                         and friends). But the deeper we go, the more the
-                         code will loose its self documenting properties.
-            */
             "add_to_group":
-                factories.command({
+                command_factory({
                     event_name:      "added_to_group",
                     required_fields: ['group'], // 'user_id' omitted as it is the stream_id for now
-                    constraint:
-                        function(fields) {
-
-                            const valid_groups = ['admins', 'listeners', 'readers'];
-
-                            if (valid_groups.includes(fields.group) !== true) {
-                                throw `"group" must be one of ${valid_groups}`
-                            }
-                        }
+                    constraint:      group_constraint
                 }),
 
             "remove_from_group":
-                factories.command({
+                command_factory({
                     event_name:      "removed_from_group",
                     required_fields: ['group'],
-                    /* Exactly the same as for "added_to_group". */
-                    constraint:
-                        function(fields) {
-
-                            const valid_groups = ['admins', 'listeners', 'readers'];
-
-                            if (valid_groups.includes(fields.group) !== true) {
-                                throw `"group" must be one of ${valid_groups}`
-                            }
-                        }
+                    constraint:      group_constraint
                 }),
         },
 
@@ -453,77 +455,65 @@ const aggregates = {
             /* Don't need the previous state, because this command creates a
                brand new instance, so there is nothing to mess up. */
             "person_added":
-                function(event_snapshot, stream_state) {
+                function(event_snapshot, state) {
 
-                    stream_state["name"] = event_snapshot.val().fields;
+                    state["name"] = event_snapshot.val().fields;
 
-                    return stream_state;
+                    return state;
                 },
 
             "person_name_changed":
-                function(event_snapshot, stream_state) {
+                function(event_snapshot, state) {
                     const event = event_snapshot.val();
                     // The previous state will be used to build the new state.
-                    stream_state["name"] = event.fields;
+                    state["name"] = event.fields;
 
-                    return stream_state;
+                    return state;
                 },
 
             "email_added":
-                factories.event_handlers.add_for_multi({
-                    state_attribute: "emails",
-                    event_field:     "email"
+                event_handler_factories.add_for_multi({
+                    attribute:   "emails",
+                    event_field: "email"
                 }),
 
             "email_updated":
-                factories.event_handlers.update_for_multi({
-                    state_attribute: "emails",
-                    event_field:     "email"
+                event_handler_factories.update_for_multi({
+                    attribute:   "emails",
+                    event_field: "email"
                 }),
 
             "email_deleted":
-                factories.event_handlers.delete_for_multi({
-                    state_attribute: "emails"
+                event_handler_factories.delete_for_multi({
+                    attribute: "emails"
                 }),
 
             "phone_number_added":
-                factories.event_handlers.add_for_multi({
-                    state_attribute: "phone_numbers",
-                    event_field:     "phone_number"
+                event_handler_factories.add_for_multi({
+                    attribute:   "phone_numbers",
+                    event_field: "phone_number"
                 }),
 
             "phone_number_updated":
-                factories.event_handlers.update_for_multi({
-                    state_attribute: "phone_numbers",
-                    event_field:     "phone_number"
+                event_handler_factories.update_for_multi({
+                    attribute:   "phone_numbers",
+                    event_field: "phone_number"
                 }),
 
             "phone_number_deleted":
-                factories.event_handlers.delete_for_multi({
-                    state_attribute: "phone_numbers"
+                event_handler_factories.delete_for_multi({
+                    attribute: "phone_numbers"
                 }),
 
             "added_to_group":
-                /* The `this.factories.event_handlers.*_for_multi()` functions
-                   are not appropriate here, because there aren't many groups
-                   and these could be just added as a list (which is tricky with
-                   Firebase's Realtime DB).
-
-                   It could be that the same phone number belong to multiple
-                   people, but using a `push()` ID they are unique values that can
-                   be traced back to individuals.
-
-                   On the other hand, a projection can be built to track how many
-                   people are using the same contact details (i.e., same address,
-                   same phone number, email, etc.).
-
-                   There may be a pattern emerging later, but leaving this as is
-                   until then.
+                /* The `event_handler_factories.*_for_multi()`  functions are not
+                   appropriate  here,  because  there   aren't  many  groups  and
+                   therefore do not require unique IDs.
                 */
-                function(event_snapshot, stream_state) {
+                function(event_snapshot, state) {
 
                     // The previous state will be used to build the new state.
-                    var state   = stream_state;
+                    var state   = state;
                     const event = event_snapshot.val();
 
                     if (state["groups"] === undefined) {
@@ -538,13 +528,15 @@ const aggregates = {
                 },
 
             "removed_from_group":
-                function(event_snapshot, stream_state) {
+                function(event_snapshot, state) {
 
-                    var state   = stream_state;
+                    var state   = state;
                     const event = event_snapshot.val();
 
-                    /* Just as in "added_to_group", membership is not checked here.
-                       That should be done before we get here. */
+                    /* Just as in "added_to_group", membership is not
+                       checked here. That should be done before we
+                       get here.
+                    */
                     const group_name = event["fields"]["group"];
                     state["groups"][group_name] = null;
 
@@ -555,47 +547,57 @@ const aggregates = {
     },
 };
 
-/* Trying to justify the current architecture, where the concerns are nicely
-    separated:
+/* `EXECUTE()` AND `APPLY()`
+   =========================
+*/
 
-        * `execute()` only creates the events and touches the EVENT_STORE
-        * `apply()`   only creates the next state and writes to the STATE_STORE
+/* In-memory STATE_STORE */
+var state_store = {};
 
-    Chaining the two functions together and skipping the messy event handler
-    stuff, but there would be downsides too.
+/* One justification for the current  architecture is that the concerns are
+   nicely separated, the operations of the  two functions do not overlap in
+   any way:
 
-    For example, with the current implementation, commands cannot arbitrarily
-    be chained together and state cannot be rolled forward, because `execute()`
-    does not mutate state and `apply()` only reacts to event notifications
-    once `execute()` writes the resulting events into the EVENT_STORE.
-    Logically, there also wouldn't make any sense to group "add_email" and
-    "delete_person" for example.
+       * `execute()` creates the events and touches the EVENT_STORE
+       * `apply()`   creates the next state and mutates the STATE_STORE
 
-    Yes, race conditions are always a concern, but command idempotency helps
-    in this field. For example, multiple admins want to delete that same
-    obsolete email for a user, submit a command, and all succeed: the
-    EVENT_STORE records all attempts, and applying the first event will
-    update the state, but the rest will reinforce the same truth only.
+   Race conditions can be a concern  as there are a couple network requests
+   towards the database between the two (see [Fallacies of distributed computing](https://en.wikipedia.org/wiki/Fallacies_of_distributed_computing)),
+   but steps have been take to mitigate these:
++ **commands are idempotent**
 
-    This is also only a module, some constraints needs to enforced by the
-    UI/API and try to prevent the users to shoot themselves in the leg.
+       For example,  if multiple admins  want to delete  that same email  for a
+       user, submit  a command,  and all succeed:  the EVENT_STORE  records all
+       attempts, and  applying the first event  will update the state,  but the
+       rest will reinforce the same truth only.
 
-    -------------------------------------------------------------------
+     + **`execute()` requires explicit "stream_id"**
 
-    So this is the theory to prevent a massive rewrite, and we'll so
-    how much is delusion and "sober peasant mind".
+       Imagine a command to create a new stream and multiple subsequent ones to
+       update it  (e.g., new person and  adding emails and groups).  Each event
+       contains  a "stream_id",  therefore  if a  new  stream (i.e.,  aggregate
+       instance) can be created in the STATE_STORE from any of them.
+
+   Also, for the  record, some constraints needs to enforced  by the UI/API
+   and try  to prevent the users  to shoot themselves in  the leg. Chaining
+   the two  functions together and  skipping the messy event  handler stuff
+   would be easy, but there would be downsides too.
 */
 function execute(p) {
 
-    /* p =
-        {
-            stream_id:     "stream_id",
-            aggregate:     "people",
-            commandString: "person_added",
-            payload:       { last_name: "Al", first_name:  "Varo"},
-            callback:      extra_logic // function for extra constraints in the command
-            seq:           current stream_state["seq"]+1
-        }
+    /* The "p" (as in "parameters") object:
+
+           "aggregate" \
+           "stream_id"  > see `create_event()`'s "p" object comments.
+           "seq"       /
+
+           "commandString": E.g., "person_added".
+
+           "payload": Second input for `verify_payload_fields()`
+                       (see comments there).
+
+           "callback": Function for adding constraints to a command.
+                       Currently nothing uses it.
     */
 
     const command = aggregates[p.aggregate]["commands"][p.commandString];
@@ -605,15 +607,203 @@ function execute(p) {
                 Choose one from ${Object.keys(aggregates[p.aggregate]["commands"])}`;
     }
 
-    /* Defined with `const` because `execute()` only uses the state
-        to inspect it in order to make decisions on what to put in
-        the generated events, but will never mutate it.
+    /* Defined with `const` because `execute()`  only uses the state to inspect
+       it in order  to make decisions on  what to put in  the generated events,
+       but will never mutate it.
     */
-    const stream_state = (state_store[p.stream_id] !== undefined) ? state_store[p.stream_id] : {};
-    const event = command(stream_state, p);
+    const state = (state_store[p.stream_id] !== undefined) ? state_store[p.stream_id] : {};
+    const event = command(state, p);
 
-    return append_event_to_stream(event);
+    /* Returns the promise that `append_event_to_stream()` also returns. */
+    return append_event_to_stream(p.stream_id, event);
 };
+
+function apply() {
+
+    // Fetch previous state.
+    ADMIN_APP.database().ref("/state_store").once("value").then(
+
+        function(state_snapshot){
+
+            /* Is there data in "/state_store"? */
+            if (state_snapshot.val() !== null) {
+                state_store = Object.assign(state_store, state_snapshot.val());
+            } else {
+                state_store = {};
+            }
+        }
+
+    ).then(
+
+        function() {
+
+            const event_store = ADMIN_APP.database().ref("/event_store");
+
+            event_store.on(
+                'child_added',
+                function(event_snapshot) {
+
+                    const event = event_snapshot.val();
+                    const stream_id = event.stream_id;
+
+                    const event_id = event_snapshot.ref.getKey();
+
+                    if ( state_store[stream_id] === undefined ) {
+                        /* Two cases when we can end up here:
+
+                           1. "/state_store" in DB  is missing entirely,
+                              therefore  condition  will return  `false`
+                              for every `stream_id`.
+
+                           2. The server was down while a new stream was
+                              started in  the EVENT_STORE,  therefore no
+                              listener  was  active  to handle  it,  and
+                              events are flooding in upon restart.
+
+                           To jump  start this  process, a  very minimal
+                           state-stub  has  to   be  supplied  to  allow
+                           applying events on top.
+
+                           NOTE:
+                           The  "aggregate"  attribute  is  not  queried
+                           past  this  point,  but  it  is  needed.  The
+                           `aggregates.<type>.event_handlers`  are  only
+                           concerned with  the events'  "fields" object,
+                           and  the  generated  "next_state"  is  simply
+                           merged  with  the  current state  (adding  or
+                           overwriting attributes). When  the next event
+                           is  fed  to  `apply()`, it  would  query  the
+                           "aggregate" attribute above,  and if missing,
+                           it  would yield  `undefined`  when trying  to
+                           find  the right  event handler,  crashing the
+                           process.
+                        */
+                        state_store[stream_id] =
+                            {
+                                aggregate: event.aggregate,
+                                seq: 0
+                            };
+
+                    }
+
+                    /* "state" = the cumulative state of an aggregate instance. */
+                    const state         = state_store[stream_id];
+                    const event_handler = aggregates[event.aggregate]["event_handlers"][event.event_name];
+
+                    if ( event.seq <= state.seq ) {
+                        console.log(`${stream_id} ${event_id} no op  (${event.seq}, ${state.seq}) ${event.event_name}` );
+                        return;
+                    } else {
+                        console.log(`${stream_id} ${event_id} replay (${event.seq}, ${state.seq}) ${event.event_name}` );
+
+                        state["seq"] = event.seq;
+
+                        var next_state = event_handler(event_snapshot, state);
+
+                        Object.assign(state, next_state);
+                        ADMIN_APP.database().ref("/state_store").child(stream_id).update(state);
+                    }
+                }
+            );
+        }
+    )
+}
+
+/* PUBLIC COMMANDS
+   ===============
+*/
+
+/* The  rationale  behind this  collection  of  commands is  that  Firebase
+   functions  are asynchronous,  therefore  to add  events  in order,  CQRS
+   commands  need  to be  chained.  (Again,  the fallacies  of  distributed
+   computing  are still  in  effect,  but this  is  one  mitigation of  any
+   potential misordered writes.)
+*/
+const public_commands = {
+
+    add_user: function(p) {
+    /* p =
+       {
+           (REQUIRED) first_name: "",
+           (REQUIRED) last_name:  "",
+                      username:   "", // "first_name" + "last_name" by default
+           // (REQUIRED) user_id:    "", // i.e., person stream_id
+           (REQUIRED) email:      "",
+                      address:    "",
+                      phone_number: "",
+           (REQUIRED) account_types: [ "admin" | "reader" | "listener" ], // array
+       }
+    */
+    /* USER_ID = PEOPLE INSTANCE (i.e., person) STREAM_ID
+
+       A person can be member to multiple groups, but using the same
+       "stream_id" for all; they cannot be added multiple times anyway
+       and easier to check for presence.
+
+       QUESTION: Is this a good idea?
+
+       ANSWER: No, but with Firebase, there can only be one user with the
+               same email, therefore group membership is an artificial
+               construct, and authorization will be implemented using
+               security rules.
+    */
+
+        // TODO create a function for optional parameter checks
+        if (p.username === undefined) {
+            p["username"] = `${p.first_name} ${p.last_name}`;
+        }
+
+        const group_commands = p.account_types.map(
+            function(group) {
+                return [ "add_to_group", { group: `${group}s` }];
+            }
+        );
+
+        const user_id = create_new_stream_id();
+
+        return chain(
+            {
+                stream_id: user_id,
+                aggregate: "people",
+                start_seq: 1,
+                commands:  [
+                    [ "add_person", {
+                        "first_name": p.first_name,
+                        "last_name":  p.last_name
+                    }],
+                    [ "add_email",{
+                        "email": p.email
+                    }],
+                    // [ "add_phone_number",{
+                    //     "phone_number": p.phone_number
+                    // }]
+                ].concat(group_commands)
+            }
+        ).then( function() {
+
+            return ADMIN_APP.auth().createUser(
+                {
+                    "disabled":    false,
+                    "displayName": p.username,
+                    "email":       p.email,
+                    "phoneNumber": p.phone_number,
+                    "uid":         user_id
+                }
+            )
+        }).then( function() {
+
+            /* The user gets an email upon subscribing them to change their
+               passwords. This is done so because reader and listener signups
+               are centralized. (For now.)
+            */
+            return CLIENT_APP.auth().sendPasswordResetEmail(p.email);
+
+        }).catch( function(e) {
+
+            console.log(e)
+        });
+    },
+}
 
 /* On success: returns Promise containing non-null admin.auth.UserRecord. */
 /* TODO Make this a transaction.
@@ -682,345 +872,13 @@ function chain(p) {
     return add_then(first_execute_promise, p.commands);
 }
 
-var state_store = {};
-
-/* TODO: outdated
-   Purpose: (0) Rebuild in-memory ("state_store") and "/state" DB state
-                on server restart.
-            (1) Attach a listener to 'event_store', that will
-            (2) attach a listener to each stream_id to listen to
-                new events.
-
-         When a new stream is started, (1) will attach a listener
-         to it, listening to new events within the stream. When a
-         new event comes in, it will be `apply`ed (i.e., projections
-         updated).
-
-         event_store
-             -LJ16Q8UiM6eJWyesqGO (stream) -> attach new listener to new child
-                 -LJ16Q8XDTfk0Z_r14EA (event) -> listener projects the data
-                 -LJ282RXV-TCLxxOh-xS (event)
-             -LJ2F09G2M_YWB78BNo_ (stream)
-                 -LJ2F09KfLTSKOXf7vlN (event)
-                 -LJ2NVlbYvz9ptVpiCkj (event)
-                 -LJ2OL1NZEQBpiA_mPDh (event)
-                 -LJ2TkQjSfhV39SXWoDh (event)
-*/
-
-/* Sequence numbers (`seq`) in events and state
-   ============================================
-
-   --- STATUS: **empty database** ---
-
-   After `require`ing this file, `apply()` is immediately invoked
-
-   1. fetching the current state from the database
-      (which yields `undefined`) and
-
-   2. attaching an `on('child_added',...)` listener on the "/event_store"
-      (mutating the state based on incoming events).
-
-   TODO: this may have become outdated as soon as I have written it down...
-   New events are generated via the  `execute()` command. On the very first
-   command there is only an empty  STATE_STORE, and the stream's state thus
-   will be a  stub (`{seq: 0}`). The event generated  by the command (e.g.,
-   "add_person") takes the current state of  the stream and saves its `seq`
-   incremented by one.
-
-   E      - `execute()`
-   e{num} - event with `seq === num`
-   S{num} - stream's state with its `seq` attribute being `num`.
-   A      - `apply()`
-
-              EVENT_STORE                            STATE_STORE
-   S0 -> E ->    e1       -> A( e1 <= S0) -> false ->    S1
-   S1 -> E ->    e2       -> A( e2 <= S1) -> false ->    S2
-
-   When STATE_STORE is deleted or unreachable, the in-memory STATE_STORE
-   will be rebuilt the same way when the server is restarted.
-
-
-   --- STATUS: **Server stopped, new events came in (e3, e4), server restarted** ---
-
-              EVENT_STORE                                      STATE_STORE
-   S2 -> E ->    e1       -> A( e1 <= S2 ) -> true  -> no op ->    S2
-   S2 -> E ->    e2       -> A( e2 <= S2 ) -> true  -> no op ->    S2
-   S2 -> E ->    e3       -> A( e3 <= S2 ) -> false ->             S3
-   S3 -> E ->    e4       -> A( e4 <= S3 ) -> false ->             S4
-
-*/
-function apply() {
-
-    // Fetch previous state.
-    FIREBASE_APP.database().ref("/state").once("value").then(
-        function(state_snapshot){
-
-            const there_is_state_in_DB = (state_snapshot.val() !== null);
-
-            if (there_is_state_in_DB === true) {
-                state_store = Object.assign(state_store, state_snapshot.val());
-            }
-
-            /* Otherwise "state_store" remains {}.*/
-        }
-    ).then(
-
-        function() {
-
-            const event_store = FIREBASE_APP.database().ref("/event_store");
-
-            event_store.on(
-                'child_added',
-                function(event_snapshot) {
-
-                    const event = event_snapshot.val();
-                    const stream_id = event.stream_id;
-
-                    const event_id = event_snapshot.ref.getKey();
-
-                    /* Get the event handler that should be used with the
-                        current event.
-
-                    const event_handler =
-                        aggregates[event.aggregate]["event_handlers"][event.event_name];
-
-                        There shouldn't be any errors because event names are assigned
-                        to commands whenever they are created, and they are never supplied
-                        by hand.
-
-                    const event_handlers = aggregates[event.aggregate]["event_handlers"];
-
-                    var event_handler;
-                    if ( event_handlers[event.event_name] !== undefined ) {
-                        event_handler = event_handlers[event.event_name];
-                    } else {
-                        const event_handler_keys = Object.keys(event_handlers);
-                        throw `No such event handler. Choose from the list: ${event_handler_keys}`
-                    };
-                    */
-
-                    /* (this should go somewhere else, probably to aggregate under
-                        the diagram)
-                        WALKTHROUGH
-                        On creating a new aggregate instance (i.e. a stream),
-                        the next state provided by `apply()` will need a
-                        place to live. (Remember, `execute(state, command)`
-                        only writes to the EVENT_STORE, and `apply(state, event)`
-                        to the STATE_STORE!)
-
-                        Example:
-
-                        ```
-                            // ! Also adds a new entry to STATE_STORE !
-                            const new_person = aggregates.people.new_instance();
-                            //       |
-                            //       `-> {
-                            //               aggregate: 'people',
-                            //               stream_id: create_new_stream_id(), // -> new stream_id
-                            //               timestamp: 0
-                            //           };
-                            execute(
-                    */
-
-                    if ( state_store[stream_id] === undefined ) {
-                    /* Two cases when we can end up here:
-
-                        1. "/state" in DB is missing entirely, therefore condition will return
-                        `false` for every `stream_id`.
-
-                        2. The server was down while a new stream was started in the EVENT_STORE,
-                        therefore no listener was active to handle it, and events are flooding
-                        in upon restart.
-
-                        To jump start this process, a very minimal state-stub has to be supplied
-                        to allow applying events on top.
-
-                        The "aggregate"  attribute is  not queried  past this  point, but  it is
-                        needed. The  `aggregates.<type>.event_handlers` are only  concerned with
-                        the event's  "fields" object,  and the generated  "stream_next_state" is
-                        simply merged with the current state (adding or overwriting attributes).
-                        When the next event is fed  to `apply()`, it would query the "aggregate"
-                        attribute above, and if missing,  it would yield `undefined` when trying
-                        to find the right event handler, crashing the process.
-                    */
-                        state_store[stream_id] =
-                            {
-                                aggregate: event.aggregate,
-                                seq: 0
-                            };
-
-                    }
-
-                    const stream_state  = state_store[stream_id];
-
-                    const event_handler = aggregates[event.aggregate]["event_handlers"][event.event_name];
-
-                    /* Comparing  the events'  and  the states'  timestamps,  to check  whether
-                       events come in  in order, is unnecessary for reasons  below, but keeping
-                       it, becuase if there is some state in the DB, the already applied events
-                       can be just skipped.
-
-                       + End  user  public functions  (such  as  `add_user()`) should  chain
-                           commands in a way that ensures the order (i.e., promise chaining of
-                           `append_event_to_stream()`).
-
-                       + Each event has the stream_id, and if there is no stream, it will be
-                           created by the check above.  For example, should events "add_email"
-                           and "add_person" arrive  in this order, it wouldn't  cause an issue
-                           (right?) as  a state-stup would be  created for the email,  and the
-                           "add_person" event would be applied on top of it.
-
-                       `=` is needed becuause otherwise it will always replay the last event.
-                       (Matching timestamps will evaluate `<` to false).
-                    */
-                    if ( event.seq <= stream_state.seq ) {
-                        console.log(`${stream_id} ${event_id} no op  (${event.seq}, ${stream_state.seq}) ${event.event_name}` );
-                        return;
-                    } else {
-                        console.log(`${stream_id} ${event_id} replay (${event.seq}, ${stream_state.seq}) ${event.event_name}` );
-
-                        stream_state["seq"] = event.seq;
-
-                        var stream_next_state = event_handler(event_snapshot, stream_state);
-
-                        Object.assign(stream_state, stream_next_state);
-                        FIREBASE_APP.database().ref("/state").child(stream_id).update(stream_state);
-                    }
-                }
-            );
-        }
-    )
-}
-// apply();
-
-/* TODO: More robust way to keep state.
-
-   Right now, `apply()` has to run immediately after server restart to
-   restore the in-memory state otherwise subsequent events will start
-   counting their sequence numbers (`seq`) from one again. The server side
-   timestamp solution was ideal in theory, but [the Firebase implementation](https://stackoverflow.com/questions/51867616/how-to-come-around-firebase-realtime-databases-server-side-timestamp-volatility)
-   makes it practically useless in this scenario. A workaround would be
-   possible with listeners, but it would probably just complicate things
-   more.
-
-   Just  for the  record,  the  `apply()` rewrite  would  have  to hit  the
-   database **twice**: use `on()` to  listen to 'child_added' events on the
-   EVENT_STORE, and inside  it would add a `once('value')`  listener on the
-   child's key. This is the theory, but won't bother with it.
-
-   To get a more robust solution, commands could query the EVENT_STORE's
-   last event to get `seq` and add 1 to it, but it is prone to the same
-   race condition issues as the others here.
-*/
-/* ADDENDUM: State will be maintained in memory for clients therefore if
-             the server is not running, they would still add events with
-             the right `seq` of each instance. (Or, at least, that is the
-             notion.)
-*/
-// apply();
-
-/* The rationale behind creating this collection is twofold:
-
-     + TECHNICAL: Firebase commands are asynchronous, and they return promises,
-       thus in order to do something on success, the actions need to be wrapped
-       in it (i.e., in `then()` for example). So in order to save the resulting
-       "user_id", the database commands need to be run in the callback.
-
-     + AESTHETICAL (not the right word, but working on it): these functions
-       would be called by end users (admins mostly) and would emit multiple
-       events. (Whereas `execute()` and `apply()` work on one command and event
-       respectively.)
-*/
-const public_commands = {
-
-    add_user: function(p) {
-    /* p =
-       {
-           (REQUIRED) first_name: "",
-           (REQUIRED) last_name:  "",
-                      username:   "", // "first_name" + "last_name" by default
-           // (REQUIRED) user_id:    "", // i.e., person stream_id
-           (REQUIRED) email:      "",
-                      address:    "",
-                      phone_number: "",
-           (REQUIRED) account_types: [ "admin" | "reader" | "listener" ], // array
-       }
-    */
-    /* USER_ID = PEOPLE INSTANCE (i.e., person) STREAM_ID
-
-       A person can be member to multiple groups, but using the same
-       "stream_id" for all; they cannot be added multiple times anyway
-       and easier to check for presence.
-
-       QUESTION: Is this a good idea?
-
-       ANSWER: No, but with Firebase, there can only be one user with the
-               same email, therefore group membership is an artificial
-               construct, and authorization will be implemented using
-               security rules.
-    */
-
-        // TODO create a function for optional parameter checks
-        if (p.username === undefined) {
-            p["username"] = `${p.first_name} ${p.last_name}`;
-        }
-
-        const group_commands = p.account_types.map(
-            function(group) {
-                return [ "add_to_group", { group: `${group}s` }];
-            }
-        );
-
-        const user_id = create_new_stream_id();
-
-        return chain(
-            {
-                stream_id: user_id,
-                aggregate: "people",
-                start_seq: 1,
-                commands:  [
-                    [ "add_person", {
-                        "first_name": p.first_name,
-                        "last_name":  p.last_name
-                    }],
-                    [ "add_email",{
-                        "email": p.email
-                    }],
-                    // [ "add_phone_number",{
-                    //     "phone_number": p.phone_number
-                    // }]
-                ].concat(group_commands)
-            }
-        ).then( function() {
-
-            return FIREBASE_APP.auth().createUser(
-                {
-                    "disabled":    false,
-                    "displayName": p.username,
-                    "email":       p.email,
-                    "phoneNumber": p.phone_number,
-                    "uid":         user_id
-                }
-            )
-        }).then( function() {
-
-            return init_firebase_client().auth().sendPasswordResetEmail(p.email);
-
-        }).catch( function(e) {
-
-            console.log(e)
-        });
-    },
-}
-
 module.exports = {
-    init_firebase_admin,
-    init_firebase_client,
     create_new_stream_id,
     verify_payload_fields,
     append_event_to_stream,
     EVENT_VERSION,
-    FIREBASE_APP,
+    ADMIN_APP,
+    CLIENT_APP,
     aggregates,
     execute,
     apply,
@@ -1058,3 +916,6 @@ f.execute({seq: 4, stream_id: alvaro, aggregate: "people", commandString: "add_t
 f.execute({seq: 8, stream_id: elrodeo, aggregate: "people", commandString: "add_to_group", payload: {group: "admins"}});
 f.execute({seq: 9, stream_id: elrodeo, aggregate: "people", commandString: "add_to_group", payload: {group: "listeners"}});
 */
+
+// f.public_commands.add_user({first_name: "Attila", last_name: "Gulyas", username: "toraritte", email: "agulyas@societyfortheblind.org", account_types: ["admin", "reader", "listener"]})
+
