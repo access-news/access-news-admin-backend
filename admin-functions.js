@@ -620,7 +620,10 @@ function execute(p) {
 
 function apply() {
 
-    // Fetch previous state.
+    /* Fetch previous state on startup (or when executing `apply()`).
+
+       TODO: Reimplement this to fetch streams lazily on demand (issue #5)
+    */
     ADMIN_APP.database().ref("/state_store").once("value").then(
 
         function(state_snapshot){
