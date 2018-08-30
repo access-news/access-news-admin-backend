@@ -242,55 +242,87 @@ const event_handler_factories = {
        number, email, etc.).
     */
 
-    add_for_multi: function(p) {
+    for_multi: function(p) {
 
-        return new Function("event_snapshot", "state",
-                `
-                const event    = event_snapshot.val();
-                const event_id = event_snapshot.ref.getKey();
+        /* The "p" (as in "parameters") object in the factories below it
+           therefore mostly to make pluralization rules explicit:
 
-                // Check if any emails have been added previously
-                if (state["${p.attribute}"] === undefined) {
-                    state["${p.attribute}"] = {};
-                    state["${p.attribute}"][event_id] = event["fields"]["${p.event_field}"];
-                } else {
-                    var update = {};
-                    update[event_id] = event["fields"]["${p.event_field}"];
-                    Object.assign(state["${p.attribute}"] , update);
-                };
+                "attribute": The plural name of the attribute in the state.
 
-                // Return the mutated state.
-                return state;
-                `)
-    },
-
-    update_for_multi: function(p) {
-
-        return new Function("event_snapshot", "state",
-                `
-                const event = event_snapshot.val();
-                state["${p.attribute}"][event.fields.event_id] = event["fields"]["${p.event_field}"];
-
-                return state;
-                `)
-    },
-
-    delete_for_multi: function(p) {
-
-        /* "p" here only requires an "attribute" field here (e.g.,
-            `{ attribute: "emails" }`), becuase the function will
-            delete one value from the attribute.
+                "event_field": The singular event field name for the datum.
         */
 
-        return new Function("event_snapshot", "state",
-                `
-                const event = event_snapshot.val();
+        return function(event_snapshot, state) {
 
-                state["${p.attribute}"][event.fields.event_id] = null;
+            const event    = event_snapshot.val();
 
-                return state;
-                `)
+            /* If there is an `event_id` property in `event.fields`,
+               it means  that the operation  is either to  delete or
+               update the entry.
+            */
+            const event_id =
+                event.fields.event_id ? event.fields.event_id : event_snapshot.ref.getKey();
+
+            /* Check if the the group of entities (e.g., emails) has
+               been added before,  and if not, create  a property in
+               the overall state.
+            */
+            if (state[p.attribute] === undefined) {
+                state[p.attribute] = {};
+            }
+
+            /* Update  the an  entity's value  or delete  the entity
+               altogether if `event_field` is not provided.
+            */
+            state[p.attribute][event_id] =
+                p.event_field ? event["fields"][p.event_field] : null;
+
+            // Return the mutated state.
+            return state;
+        }
     },
+
+    for_onoff: function(p) {
+
+        /* This handler manages a list of entities, that either exist
+           or not, and they are small in numbers therefore don't require
+           unique IDs (e.g., user groups).
+
+           `p` is same as in `for_multi`, with the added exception of
+
+                "action": "on"|"off"
+        */
+
+        return function(event_snapshot, state) {
+            const event = event_snapshot.val();
+
+            if (state[p.attribute] === undefined) {
+                state[p.attribute] = {};
+            }
+
+            const group_name = event["fields"][p.event_field];
+            state["groups"][group_name] =
+                (p.action === "on") ? true : null;
+
+            // Return the mutated state.
+            return state;
+        }
+    },
+
+    for_person_name: function() {
+
+        return function(event_snapshot, state) {
+
+            const event = event_snapshot.val();
+
+            if (event.fields.reason) {
+                event.fields.reason = null;
+            }
+            state["name"] = event.fields;
+
+            return state;
+        }
+    }
 }
 
 function command_factory(p) {
@@ -445,105 +477,6 @@ const aggregates = {
                     constraint:      group_constraint
                 }),
         },
-
-        /* Used by `applicator`. These are the actual `apply` functions
-           to mutate the state of a specific aggregate instance applying the
-           provided event. In `applicator` they are actually called `apply`.
-        */
-        event_handlers: {
-
-            /* Don't need the previous state, because this command creates a
-               brand new instance, so there is nothing to mess up. */
-            "person_added":
-                function(event_snapshot, state) {
-
-                    state["name"] = event_snapshot.val().fields;
-
-                    return state;
-                },
-
-            "person_name_changed":
-                function(event_snapshot, state) {
-                    const event = event_snapshot.val();
-                    // The previous state will be used to build the new state.
-                    state["name"] = event.fields;
-
-                    return state;
-                },
-
-            "email_added":
-                event_handler_factories.add_for_multi({
-                    attribute:   "emails",
-                    event_field: "email"
-                }),
-
-            "email_updated":
-                event_handler_factories.update_for_multi({
-                    attribute:   "emails",
-                    event_field: "email"
-                }),
-
-            "email_deleted":
-                event_handler_factories.delete_for_multi({
-                    attribute: "emails"
-                }),
-
-            "phone_number_added":
-                event_handler_factories.add_for_multi({
-                    attribute:   "phone_numbers",
-                    event_field: "phone_number"
-                }),
-
-            "phone_number_updated":
-                event_handler_factories.update_for_multi({
-                    attribute:   "phone_numbers",
-                    event_field: "phone_number"
-                }),
-
-            "phone_number_deleted":
-                event_handler_factories.delete_for_multi({
-                    attribute: "phone_numbers"
-                }),
-
-            "added_to_group":
-                /* The `event_handler_factories.*_for_multi()`  functions are not
-                   appropriate  here,  because  there   aren't  many  groups  and
-                   therefore do not require unique IDs.
-                */
-                function(event_snapshot, state) {
-
-                    // The previous state will be used to build the new state.
-                    var state   = state;
-                    const event = event_snapshot.val();
-
-                    if (state["groups"] === undefined) {
-                        state["groups"] = {};
-                    };
-
-                    const group_name = event["fields"]["group"];
-                    state["groups"][group_name] = true;
-
-                    // Return the mutated state.
-                    return state;
-                },
-
-            "removed_from_group":
-                function(event_snapshot, state) {
-
-                    var state   = state;
-                    const event = event_snapshot.val();
-
-                    /* Just as in "added_to_group", membership is not
-                       checked here. That should be done before we
-                       get here.
-                    */
-                    const group_name = event["fields"]["group"];
-                    state["groups"][group_name] = null;
-
-                    return state;
-                },
-        },
-
     },
 };
 
@@ -691,9 +624,9 @@ function apply() {
 
                     /* "state" = the cumulative state of an aggregate instance. */
                     const state         = state_store[stream_id];
-                    const event_handler = aggregates[event.aggregate]["event_handlers"][event.event_name];
+                    // const event_handler = aggregates[event.aggregate]["event_handlers"][event.event_name];
 
-                    if ( event.seq <= state.seq ) {
+                    if ( event.seq < state.seq ) {
                         console.log(`${stream_id} ${event_id} no op  (${event.seq}, ${state.seq}) ${event.event_name}` );
                         return;
                     } else {
@@ -701,9 +634,60 @@ function apply() {
 
                         state["seq"] = event.seq;
 
-                        var next_state = event_handler(event_snapshot, state);
+                        function get_event_handler() {
+                            switch (event.event_name) {
 
-                        Object.assign(state, next_state);
+                                case "person_added":
+                                case "person_name_changed":
+                                    return event_handler_factories.for_person_name();
+                                    break;
+
+                                case "email_added":
+                                case "email_updated":
+                                    return event_handler_factories.for_multi({
+                                        attribute:   "emails",
+                                        event_field: "email"
+                                    });
+                                    break;
+                                case "email_deleted":
+                                    return event_handler_factories.for_multi({
+                                        attribute:   "emails"
+                                    });
+                                    break;
+
+                                case "phone_number_added":
+                                case "phone_number_updated":
+                                    return event_handler_factories.for_multi({
+                                        attribute:   "phone_numbers",
+                                        event_field: "phone_number"
+                                    });
+                                    break;
+                                case "phone_number_deleted":
+                                    return event_handler_factories.for_multi({
+                                        attribute:   "phone_numbers",
+                                    });
+                                    break;
+
+                                case "added_to_group":
+                                    return event_handler_factories.for_onoff({
+                                        attribute:   "groups",
+                                        event_field: "group",
+                                        action:      "on"
+                                    });
+                                    break;
+                                case "removed_from_group":
+                                    return event_handler_factories.for_onoff({
+                                        attribute:   "groups",
+                                        event_field: "group",
+                                        action:      "off"
+                                    });
+                                    break;
+                            }
+                        }
+
+                        var next_state = get_event_handler()(event_snapshot, state);
+
+                        // Object.assign(state, next_state);
                         ADMIN_APP.database().ref("/state_store").child(stream_id).update(state);
                     }
                 }
@@ -920,5 +904,6 @@ f.execute({seq: 8, stream_id: elrodeo, aggregate: "people", commandString: "add_
 f.execute({seq: 9, stream_id: elrodeo, aggregate: "people", commandString: "add_to_group", payload: {group: "listeners"}});
 */
 
-// f.public_commands.add_user({first_name: "Attila", last_name: "Gulyas", username: "toraritte", email: "agulyas@societyfortheblind.org", account_types: ["admin", "reader", "listener"]})
-
+/*
+f.public_commands.add_user({first_name: "Attila", last_name: "Gulyas", username: "toraritte", email: "agulyas@societyfortheblind.org", account_types: ["admin", "reader", "listener"]})
+*/
