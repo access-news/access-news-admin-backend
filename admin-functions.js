@@ -637,51 +637,65 @@ function apply() {
             state["seq"] = event.seq;
 
             function get_event_handler() {
+
+              const f = event_handler_factories;
+
+              /* `break` is (probably) superfluous at the end
+                 of each clause but not taking chances right now.
+              */
               switch (event.event_name) {
 
                 case "person_added":
                 case "person_name_changed":
-                  return event_handler_factories.for_person_name();
+                  return f.for_person_name();
                   break;
 
                 case "email_added":
                 case "email_updated":
-                  return event_handler_factories.for_multi({
+                  return f.for_multi({
                     attribute:   "emails",
                     event_field: "email"
                   });
                   break;
                 case "email_deleted":
-                  return event_handler_factories.for_multi({
+                  return f.for_multi({
                     attribute:   "emails"
                   });
                   break;
 
                 case "phone_number_added":
                 case "phone_number_updated":
-                  return event_handler_factories.for_multi({
+                  return f.for_multi({
                     attribute:   "phone_numbers",
                     event_field: "phone_number"
                   });
                   break;
                 case "phone_number_deleted":
-                  return event_handler_factories.for_multi({
+                  return f.for_multi({
                     attribute:   "phone_numbers",
                   });
                   break;
 
                 case "added_to_group":
-                  return event_handler_factories.for_onoff({
+                  return f.for_onoff({
                     attribute:   "groups",
                     event_field: "group",
                     action:      "on"
                   });
                   break;
                 case "removed_from_group":
-                  return event_handler_factories.for_onoff({
+                  return f.for_onoff({
                     attribute:   "groups",
                     event_field: "group",
                     action:      "off"
+                  });
+                  break;
+
+                case "session_started":
+                case "session_ended":
+                  return f.for_multi({
+                    attribute: "sessions",
+                    event_field: "seconds"
                   });
                   break;
               }
