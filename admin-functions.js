@@ -654,9 +654,6 @@ function apply() {
 
               const f = event_handler_factories;
 
-              /* `break` is (probably) superfluous at the end
-                 of each clause but not taking chances right now.
-              */
               switch (event.event_name) {
 
                 case "person_added":
@@ -697,9 +694,15 @@ function apply() {
                   });
 
                 case "session_started":
+                case "session_time_updated":
                 case "session_ended":
                   return f.for_multi({
                     attr: "sessions",
+                  });
+
+                case "recording_added":
+                  return f.for_multi({
+                    attr: "recordings"
                   });
               }
             }
