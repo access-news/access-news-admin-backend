@@ -250,11 +250,15 @@ const event_handler_factories = {
             "attribute": The plural name of the attribute in the state.
 
             "event_field": The singular event field name for the datum.
+
+            "onoff": A list of entities that do not need unique IDs (e.g.,
+                     user groups). Key-value pairs such as { "item": true }
+                     are also the only way to save lists in Firebase DB.
     */
 
     return function(event_snapshot, state) {
 
-      const event    = event_snapshot.val();
+      const event = event_snapshot.val();
 
       /* If there is an `event_id` property in `event.fields`,
          it means  that the operation  is either to  delete or
@@ -263,46 +267,56 @@ const event_handler_factories = {
       const event_id =
         event.fields.event_id ? event.fields.event_id : event_snapshot.ref.getKey();
 
-      /* Check if the the group of entities (e.g., emails) has
-         been added before,  and if not, create  a property in
-         the overall state.
+      /* This covers the "*_(added|created|etc)" events by
+         adding the collection name (gyujtonev) to group the
+         same entities (phone numbers, emails etc.)
       */
-      if (state[p.attribute] === undefined) {
-        state[p.attribute] = {};
+      if (state[p.attr] === undefined) {
+        state[p.attr] = {};
       }
 
-      /* Update  the an  entity's value  or delete  the entity
-         altogether if `event_field` is not provided.
+      delete event.fields.reason
+      delete event.fields.event_id
+
+      /* If  the  payload  (i.e.,  `event.fields`)  has  only
+         one  key-value  pair  at  this  point  (i.e.,  after
+         removing  the  properties "reason"  and  "event_id")
+         then it is assumed that  only the value is needed as
+         `p.attributes` is the plural  form of the key (e.g.,
+         email -> emails).
+
+         Otherwise  the   payload  object  is   copied  under
+         `attribute/event_id/ verbatim.
       */
-      state[p.attribute][event_id] =
-        p.event_field ? event["fields"][p.event_field] : null;
+      const keys = Object.keys(event.fields);
 
-      // Return the mutated state.
-      return state;
-    }
-  },
+      if (keys.length === 1) {
 
-  for_onoff: function(p) {
+        const v = event["fields"][keys[0]];
 
-    /* This handler manages a list of entities, that either exist
-       or not, and they are small in numbers therefore don't require
-       unique IDs (e.g., user groups).
+        /* Entities not requiring unique IDs will only have one
+           key-value pair.*/
+        if (p.onoff !== undefined) {
 
-       `p` is same as in `for_multi`, with the added exception of
+          state[p.attr][v] = p.onoff ? true : null;
 
-            "action": "on"|"off"
-    */
+        } else {
 
-    return function(event_snapshot, state) {
-      const event = event_snapshot.val();
+          /* Update/Add single value under `event_id`, except when
+            `p.drop` is `true`.
+          */
+          state[p.attr][event_id] = !p.drop ? v : null;
 
-      if (state[p.attribute] === undefined) {
-        state[p.attribute] = {};
+        }
+
+      } else {
+
+        state[p.attr][event_id] = event["fields"];
       }
 
-      const group_name = event["fields"][p.event_field];
-      state["groups"][group_name] =
-        (p.action === "on") ? true : null;
+      console.log("\n");
+      console.log(state);
+      console.log("\n");
 
       // Return the mutated state.
       return state;
@@ -473,7 +487,7 @@ const aggregates = {
       "remove_from_group":
         command_factory({
           event_name:      "removed_from_group",
-          required_fields: ['group'],
+          required_fields: ['group', 'reason'],
           constraint:      group_constraint
         }),
     },
@@ -648,56 +662,45 @@ function apply() {
                 case "person_added":
                 case "person_name_changed":
                   return f.for_person_name();
-                  break;
 
                 case "email_added":
                 case "email_updated":
                   return f.for_multi({
-                    attribute:   "emails",
-                    event_field: "email"
+                    attr: "emails",
                   });
-                  break;
                 case "email_deleted":
                   return f.for_multi({
-                    attribute:   "emails"
+                    attr: "emails",
+                    drop: true
                   });
-                  break;
 
                 case "phone_number_added":
                 case "phone_number_updated":
                   return f.for_multi({
-                    attribute:   "phone_numbers",
-                    event_field: "phone_number"
+                    attr: "phone_numbers",
                   });
-                  break;
                 case "phone_number_deleted":
                   return f.for_multi({
-                    attribute:   "phone_numbers",
+                    attr: "phone_numbers",
+                    drop: true
                   });
-                  break;
 
                 case "added_to_group":
-                  return f.for_onoff({
-                    attribute:   "groups",
-                    event_field: "group",
-                    action:      "on"
+                  return f.for_multi({
+                    attr: "groups",
+                    onoff: true
                   });
-                  break;
                 case "removed_from_group":
-                  return f.for_onoff({
-                    attribute:   "groups",
-                    event_field: "group",
-                    action:      "off"
+                  return f.for_multi({
+                    attr: "groups",
+                    onoff: false
                   });
-                  break;
 
                 case "session_started":
                 case "session_ended":
                   return f.for_multi({
-                    attribute: "sessions",
-                    event_field: "seconds"
+                    attr: "sessions",
                   });
-                  break;
               }
             }
 
