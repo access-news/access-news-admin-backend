@@ -149,7 +149,7 @@ function create_event(p) {
 }
 
 function create_new_stream_id() {
-  return ADMIN_APP.database().push().key;
+  return ADMIN_APP.database().ref().push().key;
 }
 
 /* "stream_id" is also contained by the event, but I think it is more prudent
@@ -739,7 +739,10 @@ function cloud_apply() {
             const event_id = event_snapshot.ref.getKey();
             const action = (event.seq < state_seq) ? "no op" : "replay";
             console.log(`Stream: ${stream_id} event: ${event_id} ${event.event_name}`);
-            console.log(`  Action: ${action} (event_seq: ${event.seq}, state_seq: ${state_seq}) \n`);
+            console.log(`  Action: ${action} (event_seq: ${event.seq}, state_seq: ${state_seq})`);
+            if (action === "replay") {
+              console.log("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n");
+            }
           }
 
           if ( event.seq < state_seq ) {
@@ -770,7 +773,14 @@ function cloud_apply() {
               update["seq"] = event.seq;
               update["aggregate"] = event.aggregate;
 
-              function for_multi(p) {
+              /* For list attributes of an aggregate, such as emails,
+                 phone numbers, etc.
+
+                 After dropping the "reason" and "from" fields (where included),
+                 there should only be one field remaining. (See commands above.)
+                 If this is not the case, I messed up. Again.
+              */
+              function for_list(p) {
 
                 /* The "p" (as in "parameters") object in the factories below it
                   therefore mostly to make pluralization rules explicit:
@@ -782,43 +792,21 @@ function cloud_apply() {
 
                 return function(event_snapshot, state) {
 
-                  const event = event_snapshot.val();
-
-                  /* If there is an `event_id` property in `event.fields`,
-                    it means  that the operation  is either to  delete or
-                    update the entry.
-                  */
-                  const event_id =
-                    event.fields.event_id ? event.fields.event_id : event_snapshot.ref.getKey();
+                  const event =    event_snapshot.val();
+                  const event_id = event_snapshot.ref.getKey();
 
                   delete event.fields.reason;
-                  delete event.fields.event_id;
 
-                  /* If  the  payload  (i.e.,  `event.fields`)  has  only
-                    one  key-value  pair  at  this  point  (i.e.,  after
-                    removing  the  properties "reason"  and  "event_id")
-                    then it is assumed that  only the value is needed as
-                    `p.attributes` is the plural  form of the key (e.g.,
-                    email -> emails).
+                  if ( event.fields.from !== undefined) {
 
-                    Otherwise  the   payload  object  is   copied  under
-                    `attribute/event_id/ verbatim.
-                  */
-                  const keys = Object.keys(event.fields);
-
-                  if (keys.length === 1) {
-
-                    const v = event["fields"][keys[0]];
-                    update[`${p.attr}/${sanitize_key(v)}`] = !p.drop ? event_id : null;
-
-                  } else {
-                    /* TODO: is there a valid use case for this? */
-                    update[`${p.attr}/${event_id}`] = event["fields"];
+                    update[`${p.attr}/${sanitize_key(event.fields.from)}`] = null;
+                    delete event.fields.from;
                   }
 
-                  console.log("\n");
-                  console.log(update);
-                  console.log("\n");
+                  const key = Object.keys(event.fields)[0];
+                  const v   = event["fields"][key];
+
+                  update[`${p.attr}/${sanitize_key(v)}`] = !p.drop ? event_id : null;
 
                   state_ref.update(update);
                 }
@@ -845,47 +833,51 @@ function cloud_apply() {
 
                 case "email_added":
                 case "email_updated":
-                  return for_multi({
+                  return for_list({
                     attr: "emails",
                   });
                 case "email_deleted":
-                  return for_multi({
+                  return for_list({
                     attr: "emails",
                     drop: true
                   });
 
                 case "phone_number_added":
                 case "phone_number_updated":
-                  return for_multi({
+                  return for_list({
                     attr: "phone_numbers",
                   });
                 case "phone_number_deleted":
-                  return for_multi({
+                  return for_list({
                     attr: "phone_numbers",
                     drop: true
                   });
 
                 case "added_to_group":
-                  return for_multi({
+                  return for_list({
                     attr: "groups",
                   });
                 case "removed_from_group":
-                  return for_multi({
+                  return for_list({
                     attr: "groups",
                     drop: true
                   });
 
-                case "session_started":
-                case "session_time_updated":
-                case "session_ended":
-                  return for_multi({
-                    attr: "sessions",
-                  });
+                // case "session_started":
+                // case "session_time_updated":
+                // case "session_ended":
+                //   return for_multi({
+                //     attr: "sessions",
+                //   });
 
-                case "recording_added":
-                  return for_multi({
-                    attr: "recordings"
-                  });
+                // case "recording_added":
+                //   return for_multi({
+                //     attr: "recordings"
+                //   });
+
+                /* No `default` case. If event is not found,
+                   I messed something up.
+                */
               }
             }
 
@@ -1081,18 +1073,21 @@ module.exports = {
 };
 
 /*
-f.public_commands.add_user({first_name: "Attila", last_name: "Gulyas", username: "toraritte", email: "agulyas@societyfortheblind.org", account_types: ["admin", "reader", "listener"]})
+f.public_commands.add_user({first_name: "Attila", last_name: "Gulyas", username: "", email: "toraritte@gmail.com", account_types: ["admin", "reader"]})
 */
 
 /* TEST EMAIL COMMANDS
 
 var f = require('./admin-functions.js');
 
-  + Idempotent?
-    Issuing "add_email" multiple times will only changes the event_id
-    associated with the email, but won't add duplicates.
+  // + Idempotent? Yes.
+  //   Issuing "add_email" multiple times will only changes the event_id
+  //   associated with the email, but won't add duplicates.
 f.execute({seq: 6, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "add_email", payload: {email: "another@one.com"}});
 
-f.execute({seq: 7, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "update_email", payload: {email: "hehe@hehe.hu", reason: "test", event_id: "-LLafo_z050wxG_npswN"}});
-f.execute({seq: 8, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "delete_email", payload: {email: "hehe@hehe.hu", reason: "test2", event_id: "-LLafo_z050wxG_npswN"}});
+  // + Idempotent? Yes.
+f.execute({seq: 7, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "update_email", payload: { from: "another@one.com", to: "hehe@hehe.hu", reason: "test"}});
+
+  // + Idempotent? Yes.
+f.execute({seq: 8, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "delete_email", payload: {email: "hehe@hehe.hu", reason: "test2"}});
 */
