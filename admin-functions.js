@@ -257,6 +257,13 @@ const event_handler_factories = {
      number, email, etc.).
   */
 
+  /* For list attributes of an aggregate, such as emails,
+      phone numbers, etc.
+
+      After dropping the "reason" and "from" fields (where included),
+      there should only be one field remaining. (See commands above.)
+      If this is not the case, I messed up. Again.
+  */
   for_multi: function(p) {
 
     /* The "p" (as in "parameters") object in the factories below it
@@ -273,14 +280,8 @@ const event_handler_factories = {
 
     return function(event_snapshot, state) {
 
-      const event = event_snapshot.val();
-
-      /* If there is an `event_id` property in `event.fields`,
-         it means  that the operation  is either to  delete or
-         update the entry.
-      */
-      const event_id =
-        event.fields.event_id ? event.fields.event_id : event_snapshot.ref.getKey();
+      const event    = event_snapshot.val();
+      const event_id = event_snapshot.ref.getKey();
 
       /* This covers the "*_(added|created|etc)" events by
          adding the collection name (gyujtonev) to group the
@@ -290,30 +291,18 @@ const event_handler_factories = {
         state[p.attr] = {};
       }
 
-      delete event.fields.reason
-      delete event.fields.event_id
+      delete event.fields.reason;
 
-      /* If  the  payload  (i.e.,  `event.fields`)  has  only
-         one  key-value  pair  at  this  point  (i.e.,  after
-         removing  the  properties "reason"  and  "event_id")
-         then it is assumed that  only the value is needed as
-         `p.attributes` is the plural  form of the key (e.g.,
-         email -> emails).
+      if ( event.fields.from !== undefined ) {
 
-         Otherwise  the   payload  object  is   copied  under
-         `attribute/event_id/ verbatim.
-      */
-      const keys = Object.keys(event.fields);
-
-      if (keys.length === 1) {
-
-        const v = event["fields"][keys[0]];
-        state[p.attr][sanitize_key(v)] = !p.drop ? event_id : null;
-
-      } else {
-
-        state[p.attr][event_id] = event["fields"];
+        state[p.attr][sanitize_key(event.fields.from)] = null;
+        delete event.fields.from;
       }
+
+      const k = Object.keys(event.fields)[0];
+      const v = event["fields"][k];
+
+      state[p.attr][sanitize_key(v)] = !p.drop ? event_id : null;
 
       console.log("\n");
       console.log(state);
@@ -595,8 +584,6 @@ function apply() {
           const event = event_snapshot.val();
           const stream_id = event.stream_id;
 
-          const event_id = event_snapshot.ref.getKey();
-
           if ( state_store[stream_id] === undefined ) {
             /* Two cases when we can end up here:
 
@@ -635,17 +622,26 @@ function apply() {
           }
 
           /* "state" = the cumulative state of an aggregate instance. */
-          const state         = state_store[stream_id];
+          const state = state_store[stream_id];
+
+          function check() {
+            const event_id = event_snapshot.ref.getKey();
+            const action = (event.seq < state.seq) ? "no op" : "replay";
+            console.log(`Stream: ${stream_id} event: ${event_id} ${event.event_name}`);
+            console.log(`  Action: ${action} (event_seq: ${event.seq}, state.seq: ${state.seq})`);
+            if (action === "replay") {
+              console.log("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n");
+            }
+          }
+          check();
 
           /* Not using  `<=` because there may  be multiple events
              with  the  same  `seq` (because  of  stupidity,  race
              conditions etc.) and this allows applying them
           */
           if ( event.seq < state.seq ) {
-            console.log(`${stream_id} ${event_id} no op  (${event.seq}, ${state.seq}) ${event.event_name}` );
             return;
           } else {
-            console.log(`${stream_id} ${event_id} replay (${event.seq}, ${state.seq}) ${event.event_name}` );
 
             state["seq"] = event.seq;
 
@@ -691,17 +687,17 @@ function apply() {
                     drop: true
                   });
 
-                case "session_started":
-                case "session_time_updated":
-                case "session_ended":
-                  return f.for_multi({
-                    attr: "sessions",
-                  });
+                // case "session_started":
+                // case "session_time_updated":
+                // case "session_ended":
+                //   return f.for_multi({
+                //     attr: "sessions",
+                //   });
 
-                case "recording_added":
-                  return f.for_multi({
-                    attr: "recordings"
-                  });
+                // case "recording_added":
+                //   return f.for_multi({
+                //     attr: "recordings"
+                //   });
               }
             }
 
@@ -715,183 +711,16 @@ function apply() {
   )
 }
 
-function cloud_apply() {
+/* Leaving this here for future reference as to why
+   Firebase Cloud Functions is not the right solution.
+   (At least, not right now. Will see when more time is
+   available.)
 
-  ADMIN_APP.database().ref("/event_store").on(
-    'child_added',
-    function(event_snapshot) {
+   https://medium.com/scientific-breakthrough-of-the-afternoon/cqrs-es-and-firebase-cloud-functions-ed67ea151444
 
-      const event = event_snapshot.val();
-      const stream_id = event.stream_id;
-
-      const state_ref = ADMIN_APP.database().ref("/state_store").child(stream_id);
-
-      state_ref.once("value").then(
-
-        function(state_snapshot) {
-
-          /* Mutating the state, because `Object.assign()` only makes a shallow copy.
-          */
-          const state = state_snapshot.val();
-          const state_seq = (state === null) ? 0 : state.seq;
-
-          function check() {
-            const event_id = event_snapshot.ref.getKey();
-            const action = (event.seq < state_seq) ? "no op" : "replay";
-            console.log(`Stream: ${stream_id} event: ${event_id} ${event.event_name}`);
-            console.log(`  Action: ${action} (event_seq: ${event.seq}, state_seq: ${state_seq})`);
-            if (action === "replay") {
-              console.log("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n");
-            }
-          }
-
-          if ( event.seq < state_seq ) {
-            check();
-            return;
-          } else {
-
-            check();
-
-            function make_event_handler() {
-
-              function sanitize_key(key) {
-                return key.split('').map(
-                  function(c) {
-                    switch (c) {
-                      case ".": return "<dot>";
-                      case "#": return "<hash>";
-                      case "$": return "<dollar>";
-                      case "/": return "<forward-slash>";
-                      case "[": return "<opening-bracket>";
-                      case "]": return "<closing-bracket>";
-                      default:  return c;
-                    }
-                  }).join('');
-              }
-
-              var update = {};
-              update["seq"] = event.seq;
-              update["aggregate"] = event.aggregate;
-
-              /* For list attributes of an aggregate, such as emails,
-                 phone numbers, etc.
-
-                 After dropping the "reason" and "from" fields (where included),
-                 there should only be one field remaining. (See commands above.)
-                 If this is not the case, I messed up. Again.
-              */
-              function for_list(p) {
-
-                /* The "p" (as in "parameters") object in the factories below it
-                  therefore mostly to make pluralization rules explicit:
-
-                        "attribute": The plural name of the attribute in the state.
-
-                        "event_field": The singular event field name for the datum.
-                */
-
-                return function(event_snapshot, state) {
-
-                  const event =    event_snapshot.val();
-                  const event_id = event_snapshot.ref.getKey();
-
-                  delete event.fields.reason;
-
-                  if ( event.fields.from !== undefined) {
-
-                    update[`${p.attr}/${sanitize_key(event.fields.from)}`] = null;
-                    delete event.fields.from;
-                  }
-
-                  const key = Object.keys(event.fields)[0];
-                  const v   = event["fields"][key];
-
-                  update[`${p.attr}/${sanitize_key(v)}`] = !p.drop ? event_id : null;
-
-                  state_ref.update(update);
-                }
-              }
-
-              function for_person_name() {
-
-                return function(event_snapshot, state) {
-
-                  const event = event_snapshot.val();
-
-                  delete event.fields.reason
-                  update["name"] = event.fields;
-
-                  state_ref.update(update);
-                }
-              }
-
-              switch (event.event_name) {
-
-                case "person_added":
-                case "person_name_changed":
-                  return for_person_name();
-
-                case "email_added":
-                case "email_updated":
-                  return for_list({
-                    attr: "emails",
-                  });
-                case "email_deleted":
-                  return for_list({
-                    attr: "emails",
-                    drop: true
-                  });
-
-                case "phone_number_added":
-                case "phone_number_updated":
-                  return for_list({
-                    attr: "phone_numbers",
-                  });
-                case "phone_number_deleted":
-                  return for_list({
-                    attr: "phone_numbers",
-                    drop: true
-                  });
-
-                case "added_to_group":
-                  return for_list({
-                    attr: "groups",
-                  });
-                case "removed_from_group":
-                  return for_list({
-                    attr: "groups",
-                    drop: true
-                  });
-
-                // case "session_started":
-                // case "session_time_updated":
-                // case "session_ended":
-                //   return for_multi({
-                //     attr: "sessions",
-                //   });
-
-                // case "recording_added":
-                //   return for_multi({
-                //     attr: "recordings"
-                //   });
-
-                /* No `default` case. If event is not found,
-                   I messed something up.
-                */
-              }
-            }
-
-            const update_state = make_event_handler();
-
-            update_state(event_snapshot, state);
-
-          }
-
-        }
-      );
+    function cloud_apply() {
     }
-  );
-}
+*/
 
 /* PUBLIC COMMANDS
    ===============
@@ -1057,7 +886,6 @@ function chain(p) {
 }
 
 module.exports = {
-  cloud_apply,
   create_new_stream_id,
   verify_payload_fields,
   append_event_to_stream,
@@ -1083,11 +911,24 @@ var f = require('./admin-functions.js');
   // + Idempotent? Yes.
   //   Issuing "add_email" multiple times will only changes the event_id
   //   associated with the email, but won't add duplicates.
-f.execute({seq: 6, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "add_email", payload: {email: "another@one.com"}});
+f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "add_email", payload: {email: "another@one.com"}});
 
   // + Idempotent? Yes.
-f.execute({seq: 7, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "update_email", payload: { from: "another@one.com", to: "hehe@hehe.hu", reason: "test"}});
+f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "update_email", payload: { from: "another@one.com", to: "hehe@hehe.hu", reason: "test"}});
 
   // + Idempotent? Yes.
-f.execute({seq: 8, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "delete_email", payload: {email: "hehe@hehe.hu", reason: "test2"}});
+f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "delete_email", payload: {email: "hehe@hehe.hu", reason: "test2"}});
+
+   TEST NAME CHANGE
+
+f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "change_name", payload: {first_name: "A", last_name: "G", reason: "test2"}});
+
+   TEST GROUPS
+
+f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "remove_from_group", payload: {group: "listeners", reason: "test"}});
+
+f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "add_to_group", payload: {group: "listeners"}});
+
+   TEST PHONE
+TODO: normalize phone numbers, as those will be the keys!
 */
