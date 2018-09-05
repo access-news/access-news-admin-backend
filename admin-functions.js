@@ -149,7 +149,7 @@ function create_event(p) {
 }
 
 function create_new_stream_id() {
-  return ADMIN_APP.database().ref("/streams").push().key;
+  return ADMIN_APP.database().push().key;
 }
 
 /* "stream_id" is also contained by the event, but I think it is more prudent
@@ -162,7 +162,7 @@ function append_event_to_stream(stream_id, event) {
   const event_id = db.ref("event_store").push().key;
 
   var updates = {};
-  updates[`/streams/${stream_id}/${event_id}`] = event;
+  // updates[`/streams/${stream_id}/${event_id}`] = event;
   updates[`/event_store/${event_id}`] = event;
 
   /* `firebase.database.Reference.update()` returns a void promise,
@@ -211,6 +211,21 @@ function verify_payload_fields(p) {
   }
 
   return fields;
+}
+
+function sanitize_key(key) {
+  return key.split('').map(
+    function(c) {
+      switch (c) {
+        case ".": return "<dot>";
+        case "#": return "<hash>";
+        case "$": return "<dollar>";
+        case "/": return "<forward-slash>";
+        case "[": return "<opening-bracket>";
+        case "]": return "<closing-bracket>";
+        default:  return c;
+      }
+    }).join('');
 }
 
 const event_handler_factories = {
@@ -293,21 +308,7 @@ const event_handler_factories = {
       if (keys.length === 1) {
 
         const v = event["fields"][keys[0]];
-
-        /* Entities not requiring unique IDs will only have one
-           key-value pair.*/
-        if (p.onoff !== undefined) {
-
-          state[p.attr][v] = p.onoff ? true : null;
-
-        } else {
-
-          /* Update/Add single value under `event_id`, except when
-            `p.drop` is `true`.
-          */
-          state[p.attr][event_id] = !p.drop ? v : null;
-
-        }
+        state[p.attr][sanitize_key(v)] = !p.drop ? event_id : null;
 
       } else {
 
@@ -448,14 +449,13 @@ const aggregates = {
       "update_email":
         command_factory({
           event_name:      'email_updated',
-          required_fields: ['email', 'event_id', 'reason'],
+          required_fields: ['from', 'to', 'reason'],
         }),
 
       "delete_email":
         command_factory({
           event_name:      'email_deleted',
-          // Technically 'email' is not required, but nice to avoid an extra lookup
-          required_fields: ['email', 'event_id', 'reason']
+          required_fields: ['email', 'reason']
         }),
 
       "add_phone_number":
@@ -467,14 +467,13 @@ const aggregates = {
       "update_phone_number":
         command_factory({
           event_name:      'phone_number_updated',
-          required_fields: ['phone_number', 'event_id', 'reason'],
+          required_fields: ['from', 'to', 'reason'],
         }),
 
       "delete_phone_number":
         command_factory({
           event_name:      'phone_number_deleted',
-          // Technically 'phone_number' is not required, but nice to avoid an extra lookup
-          required_fields: ['phone_number', 'event_id', 'reason']
+          required_fields: ['phone_number', 'reason']
         }),
 
       "add_to_group":
@@ -685,12 +684,11 @@ function apply() {
                 case "added_to_group":
                   return f.for_multi({
                     attr: "groups",
-                    onoff: true
                   });
                 case "removed_from_group":
                   return f.for_multi({
                     attr: "groups",
-                    onoff: false
+                    drop: true
                   });
 
                 case "session_started":
@@ -707,15 +705,200 @@ function apply() {
               }
             }
 
-            var next_state = get_event_handler()(event_snapshot, state);
+            get_event_handler()(event_snapshot, state);
 
-            // Object.assign(state, next_state);
             ADMIN_APP.database().ref("/state_store").child(stream_id).update(state);
           }
         }
       );
     }
   )
+}
+
+function cloud_apply() {
+
+  ADMIN_APP.database().ref("/event_store").on(
+    'child_added',
+    function(event_snapshot) {
+
+      const event = event_snapshot.val();
+      const stream_id = event.stream_id;
+
+      const state_ref = ADMIN_APP.database().ref("/state_store").child(stream_id);
+
+      state_ref.once("value").then(
+
+        function(state_snapshot) {
+
+          /* Mutating the state, because `Object.assign()` only makes a shallow copy.
+          */
+          const state = state_snapshot.val();
+          const state_seq = (state === null) ? 0 : state.seq;
+
+          function check() {
+            const event_id = event_snapshot.ref.getKey();
+            const action = (event.seq < state_seq) ? "no op" : "replay";
+            console.log(`Stream: ${stream_id} event: ${event_id} ${event.event_name}`);
+            console.log(`  Action: ${action} (event_seq: ${event.seq}, state_seq: ${state_seq}) \n`);
+          }
+
+          if ( event.seq < state_seq ) {
+            check();
+            return;
+          } else {
+
+            check();
+
+            function make_event_handler() {
+
+              function sanitize_key(key) {
+                return key.split('').map(
+                  function(c) {
+                    switch (c) {
+                      case ".": return "<dot>";
+                      case "#": return "<hash>";
+                      case "$": return "<dollar>";
+                      case "/": return "<forward-slash>";
+                      case "[": return "<opening-bracket>";
+                      case "]": return "<closing-bracket>";
+                      default:  return c;
+                    }
+                  }).join('');
+              }
+
+              var update = {};
+              update["seq"] = event.seq;
+              update["aggregate"] = event.aggregate;
+
+              function for_multi(p) {
+
+                /* The "p" (as in "parameters") object in the factories below it
+                  therefore mostly to make pluralization rules explicit:
+
+                        "attribute": The plural name of the attribute in the state.
+
+                        "event_field": The singular event field name for the datum.
+                */
+
+                return function(event_snapshot, state) {
+
+                  const event = event_snapshot.val();
+
+                  /* If there is an `event_id` property in `event.fields`,
+                    it means  that the operation  is either to  delete or
+                    update the entry.
+                  */
+                  const event_id =
+                    event.fields.event_id ? event.fields.event_id : event_snapshot.ref.getKey();
+
+                  delete event.fields.reason;
+                  delete event.fields.event_id;
+
+                  /* If  the  payload  (i.e.,  `event.fields`)  has  only
+                    one  key-value  pair  at  this  point  (i.e.,  after
+                    removing  the  properties "reason"  and  "event_id")
+                    then it is assumed that  only the value is needed as
+                    `p.attributes` is the plural  form of the key (e.g.,
+                    email -> emails).
+
+                    Otherwise  the   payload  object  is   copied  under
+                    `attribute/event_id/ verbatim.
+                  */
+                  const keys = Object.keys(event.fields);
+
+                  if (keys.length === 1) {
+
+                    const v = event["fields"][keys[0]];
+                    update[`${p.attr}/${sanitize_key(v)}`] = !p.drop ? event_id : null;
+
+                  } else {
+                    /* TODO: is there a valid use case for this? */
+                    update[`${p.attr}/${event_id}`] = event["fields"];
+                  }
+
+                  console.log("\n");
+                  console.log(update);
+                  console.log("\n");
+
+                  state_ref.update(update);
+                }
+              }
+
+              function for_person_name() {
+
+                return function(event_snapshot, state) {
+
+                  const event = event_snapshot.val();
+
+                  delete event.fields.reason
+                  update["name"] = event.fields;
+
+                  state_ref.update(update);
+                }
+              }
+
+              switch (event.event_name) {
+
+                case "person_added":
+                case "person_name_changed":
+                  return for_person_name();
+
+                case "email_added":
+                case "email_updated":
+                  return for_multi({
+                    attr: "emails",
+                  });
+                case "email_deleted":
+                  return for_multi({
+                    attr: "emails",
+                    drop: true
+                  });
+
+                case "phone_number_added":
+                case "phone_number_updated":
+                  return for_multi({
+                    attr: "phone_numbers",
+                  });
+                case "phone_number_deleted":
+                  return for_multi({
+                    attr: "phone_numbers",
+                    drop: true
+                  });
+
+                case "added_to_group":
+                  return for_multi({
+                    attr: "groups",
+                  });
+                case "removed_from_group":
+                  return for_multi({
+                    attr: "groups",
+                    drop: true
+                  });
+
+                case "session_started":
+                case "session_time_updated":
+                case "session_ended":
+                  return for_multi({
+                    attr: "sessions",
+                  });
+
+                case "recording_added":
+                  return for_multi({
+                    attr: "recordings"
+                  });
+              }
+            }
+
+            const update_state = make_event_handler();
+
+            update_state(event_snapshot, state);
+
+          }
+
+        }
+      );
+    }
+  );
 }
 
 /* PUBLIC COMMANDS
@@ -882,6 +1065,7 @@ function chain(p) {
 }
 
 module.exports = {
+  cloud_apply,
   create_new_stream_id,
   verify_payload_fields,
   append_event_to_stream,
@@ -897,35 +1081,18 @@ module.exports = {
 };
 
 /*
-var f = require('./admin-functions.js');
-f.execute({seq: 1, stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "El", last_name: "Rodeo" }});
-f.execute({seq: 1, stream_id: f.create_new_stream_id(), aggregate: "people", commandString: "add_person", payload: { first_name: "Al", last_name: "Varo" }});
-
-var elrodeo = "-LK46YVGQg8e6Hw3DNmH";
-f.execute({seq: 2, stream_id: elrodeo, aggregate: "people", commandString: "add_email", payload: { email: "el@rod.eo" }});
-f.execute({seq: 3, stream_id: elrodeo, aggregate: "people", commandString: "add_email", payload: { email: "meg@egy.com" }});
-
-var alvaro  = "-LK46YVkhW90tzL1JP8C";
-f.execute({seq: 2, stream_id: alvaro, aggregate: "people", commandString: "add_phone_number", payload: {phone_number: "112"}});
-
-f.execute({seq: 4, stream_id: elrodeo, aggregate: "people", commandString: "add_phone_number", payload: {phone_number: "777"}});
-
-// TESTING ADDING AND REMOVING GROUPS
-f.execute({seq: 5, stream_id: elrodeo, aggregate: "people", commandString: "add_to_group", payload: {group: "admins"}});
-f.execute({seq: 6, stream_id: elrodeo, aggregate: "people", commandString: "remove_from_group", payload: {group: "admins"}});
-
-var elrodeos_emailid = "-LK46kHf06abiUK5-W81";
-f.execute({seq: 7, stream_id: elrodeo, aggregate: "people", commandString: "update_email", payload: { email: "EL@ROD.EO", event_id: elrodeos_emailid, reason: "testing"}});
-
-var alvaros_phone_id = "-LK46uHvLbPskBIMMiM8";
-f.execute({seq: 3, stream_id: alvaro, aggregate: "people", commandString: "update_phone_number", payload: { phone_number: "456", event_id: alvaros_phone_id, reason: "testing"}});
-
-f.execute({seq: 4, stream_id: alvaro, aggregate: "people", commandString: "add_to_group", payload: {group: "admins"}});
-
-f.execute({seq: 8, stream_id: elrodeo, aggregate: "people", commandString: "add_to_group", payload: {group: "admins"}});
-f.execute({seq: 9, stream_id: elrodeo, aggregate: "people", commandString: "add_to_group", payload: {group: "listeners"}});
+f.public_commands.add_user({first_name: "Attila", last_name: "Gulyas", username: "toraritte", email: "agulyas@societyfortheblind.org", account_types: ["admin", "reader", "listener"]})
 */
 
-/*
-f.public_commands.add_user({first_name: "Attila", last_name: "Gulyas", username: "toraritte", email: "agulyas@societyfortheblind.org", account_types: ["admin", "reader", "listener"]})
+/* TEST EMAIL COMMANDS
+
+var f = require('./admin-functions.js');
+
+  + Idempotent?
+    Issuing "add_email" multiple times will only changes the event_id
+    associated with the email, but won't add duplicates.
+f.execute({seq: 6, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "add_email", payload: {email: "another@one.com"}});
+
+f.execute({seq: 7, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "update_email", payload: {email: "hehe@hehe.hu", reason: "test", event_id: "-LLafo_z050wxG_npswN"}});
+f.execute({seq: 8, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "delete_email", payload: {email: "hehe@hehe.hu", reason: "test2", event_id: "-LLafo_z050wxG_npswN"}});
 */
