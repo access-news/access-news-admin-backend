@@ -326,6 +326,20 @@ const event_handler_factories = {
 
       return state;
     }
+  },
+
+  /* The general case is when event.fields are just merged
+     with state. For recordings this may change, but for
+     sessions we just want to know the latest value for the
+     session.
+  */
+  for_general: function() {
+
+    return function(event_snapshot, state) {
+
+      const event = event_snapshot.val();
+      return Object.assign(state, event.fields);
+    }
   }
 }
 
@@ -691,17 +705,13 @@ function apply() {
                     drop: true
                   });
 
-                // case "session_started":
-                // case "session_time_updated":
-                // case "session_ended":
-                //   return f.for_multi({
-                //     attr: "sessions",
-                //   });
+                case "session_started":
+                case "session_time_updated":
+                case "session_ended":
+                  return f.for_general();
 
-                // case "recording_added":
-                //   return f.for_multi({
-                //     attr: "recordings"
-                //   });
+                case "recording_added":
+                  return f.for_general();
               }
             }
 
