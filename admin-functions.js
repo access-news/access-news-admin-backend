@@ -413,7 +413,7 @@ function group_constraint(fields) {
 
 const aggregates = {
 
-  people: {
+  person: {
 
     commands: {
 
@@ -687,17 +687,17 @@ function apply() {
                     drop: true
                   });
 
-                // case "session_started":
-                // case "session_time_updated":
-                // case "session_ended":
-                //   return f.for_multi({
-                //     attr: "sessions",
-                //   });
+                case "session_started":
+                case "session_time_updated":
+                case "session_ended":
+                  return f.for_multi({
+                    attr: "sessions",
+                  });
 
-                // case "recording_added":
-                //   return f.for_multi({
-                //     attr: "recordings"
-                //   });
+                case "recording_added":
+                  return f.for_multi({
+                    attr: "recordings"
+                  });
               }
             }
 
@@ -747,7 +747,7 @@ const public_commands = {
          (REQUIRED) account_types: [ "admin" | "reader" | "listener" ], // array
      }
   */
-  /* USER_ID = PEOPLE INSTANCE (i.e., person) STREAM_ID
+  /* USER_ID = person INSTANCE STREAM_ID
 
      A person can be member to multiple groups, but using the same
      "stream_id" for all; they cannot be added multiple times anyway
@@ -777,7 +777,7 @@ const public_commands = {
      return chain(
        {
          stream_id: user_id,
-         aggregate: "people",
+         aggregate: "person",
          start_seq: 1,
          commands:  [
            [ "add_person", {
@@ -835,7 +835,7 @@ const public_commands = {
 function chain(p) {
   /* p = {
            stream_id: "stream_id",
-           aggregate: "people",
+           aggregate: "person",
            start_seq: 1,
                        ---command---  ---payload-------------
            commands:  [["add_person", { first_name: .., ...], [...], ... ]
@@ -911,23 +911,23 @@ var f = require('./admin-functions.js');
   // + Idempotent? Yes.
   //   Issuing "add_email" multiple times will only changes the event_id
   //   associated with the email, but won't add duplicates.
-f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "add_email", payload: {email: "another@one.com"}});
+f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "person", commandString: "add_email", payload: {email: "another@one.com"}});
 
   // + Idempotent? Yes.
-f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "update_email", payload: { from: "another@one.com", to: "hehe@hehe.hu", reason: "test"}});
+f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "person", commandString: "update_email", payload: { from: "another@one.com", to: "hehe@hehe.hu", reason: "test"}});
 
   // + Idempotent? Yes.
-f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "delete_email", payload: {email: "hehe@hehe.hu", reason: "test2"}});
+f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "person", commandString: "delete_email", payload: {email: "hehe@hehe.hu", reason: "test2"}});
 
    TEST NAME CHANGE
 
-f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "change_name", payload: {first_name: "A", last_name: "G", reason: "test2"}});
+f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "person", commandString: "change_name", payload: {first_name: "A", last_name: "G", reason: "test2"}});
 
    TEST GROUPS
 
-f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "remove_from_group", payload: {group: "listeners", reason: "test"}});
+f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "person", commandString: "remove_from_group", payload: {group: "listeners", reason: "test"}});
 
-f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "people", commandString: "add_to_group", payload: {group: "listeners"}});
+f.execute({seq: 5, stream_id: "-LL0WL4l6qwaCNndM44l", aggregate: "person", commandString: "add_to_group", payload: {group: "listeners"}});
 
    TEST PHONE
 TODO: normalize phone numbers, as those will be the keys!
