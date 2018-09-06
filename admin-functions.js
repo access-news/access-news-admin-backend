@@ -581,7 +581,8 @@ function apply() {
         'child_added',
         function(event_snapshot) {
 
-          const event = event_snapshot.val();
+          const event =     event_snapshot.val();
+          const event_id =  event_snapshot.ref.getKey();
           const stream_id = event.stream_id;
 
           if ( state_store[stream_id] === undefined ) {
@@ -616,8 +617,11 @@ function apply() {
             */
             state_store[stream_id] =
               {
-                aggregate: event.aggregate,
-                seq: 0
+                "_meta":
+                  {
+                    aggregate: event.aggregate,
+                    seq: 0,
+                  }
               };
           }
 
@@ -625,10 +629,9 @@ function apply() {
           const state = state_store[stream_id];
 
           function check() {
-            const event_id = event_snapshot.ref.getKey();
             const action = (event.seq < state.seq) ? "no op" : "replay";
             console.log(`Stream: ${stream_id} event: ${event_id} ${event.event_name}`);
-            console.log(`  Action: ${action} (event_seq: ${event.seq}, state.seq: ${state.seq})`);
+            console.log(`  Action: ${action} (event_seq: ${event.seq}, state.seq: ${state._meta.seq})`);
             if (action === "replay") {
               console.log("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n");
             }
@@ -643,7 +646,8 @@ function apply() {
             return;
           } else {
 
-            state["seq"] = event.seq;
+            state["_meta"]["seq"] = event.seq;
+            state["_meta"]["last_event_id"] = event_id;
 
             function get_event_handler() {
 
@@ -687,17 +691,17 @@ function apply() {
                     drop: true
                   });
 
-                case "session_started":
-                case "session_time_updated":
-                case "session_ended":
-                  return f.for_multi({
-                    attr: "sessions",
-                  });
+                // case "session_started":
+                // case "session_time_updated":
+                // case "session_ended":
+                //   return f.for_multi({
+                //     attr: "sessions",
+                //   });
 
-                case "recording_added":
-                  return f.for_multi({
-                    attr: "recordings"
-                  });
+                // case "recording_added":
+                //   return f.for_multi({
+                //     attr: "recordings"
+                //   });
               }
             }
 
