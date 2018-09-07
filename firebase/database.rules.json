@@ -1,0 +1,18 @@
+{
+  "rules": {
+    "event_store": {
+      ".read":  false,
+      ".write": "auth != null"
+    },
+
+    "publications": {
+      ".read":  "auth != null",
+      ".write": false
+    },
+
+    "state_store": {
+      ".read":  false,
+      ".write": false
+    }
+  }
+}
