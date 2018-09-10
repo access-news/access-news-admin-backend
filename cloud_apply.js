@@ -63,7 +63,7 @@ function cloud_apply() {
                  there should only be one field remaining. (See commands above.)
                  If this is not the case, I messed up. Again.
               */
-              function for_list(p) {
+              function for_multi(p) {
 
                 /* The "p" (as in "parameters") object in the factories below it
                   therefore mostly to make pluralization rules explicit:
@@ -116,32 +116,32 @@ function cloud_apply() {
 
                 case "email_added":
                 case "email_updated":
-                  return for_list({
+                  return for_multi({
                     attr: "emails",
                   });
                 case "email_deleted":
-                  return for_list({
+                  return for_multi({
                     attr: "emails",
                     drop: true
                   });
 
                 case "phone_number_added":
                 case "phone_number_updated":
-                  return for_list({
+                  return for_multi({
                     attr: "phone_numbers",
                   });
                 case "phone_number_deleted":
-                  return for_list({
+                  return for_multi({
                     attr: "phone_numbers",
                     drop: true
                   });
 
                 case "added_to_group":
-                  return for_list({
+                  return for_multi({
                     attr: "groups",
                   });
                 case "removed_from_group":
-                  return for_list({
+                  return for_multi({
                     attr: "groups",
                     drop: true
                   });
