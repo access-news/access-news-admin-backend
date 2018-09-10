@@ -4,7 +4,7 @@
 
    --- STATUS: **empty database** ---
 
-   After `require`ing this file, `apply()` is immediately invoked
+   After `require`ing this file, `rebuild_state_store()` is immediately invoked
 
    1. fetching the current state from the database
       (which yields `undefined`) and
@@ -21,7 +21,7 @@
    E      - `execute()`
    e{num} - event with `seq === num`
    S{num} - stream's state with its `seq` attribute being `num`.
-   A      - `apply()`
+   A      - `rebuild_state_store()`
 
               EVENT_STORE                            STATE_STORE
    S0 -> E ->    e1       -> A( e1 <= S0) -> false ->    S1
@@ -172,7 +172,7 @@ function append_event_to_stream(stream_id, event) {
   return db.ref().update(updates);
 };
 
-/* HELPERS FOR `EXECUTE()` AND `APPLY()`
+/* HELPERS FOR `EXECUTE()` AND `rebuild_state_store()`
    =====================================
 */
 
@@ -304,9 +304,9 @@ const event_handler_factories = {
 
       state[p.attr][sanitize_key(v)] = !p.drop ? event_id : null;
 
-      console.log("\n");
-      console.log(state);
-      console.log("\n");
+      // console.log("\n");
+      // console.log(state);
+      // console.log("\n");
 
       // Return the mutated state.
       return state;
@@ -412,7 +412,7 @@ function command_factory(p) {
   };
 }
 
-/* COMMANDS (for `execute()`) AND EVENT HANDLERS (for `apply()`)
+/* COMMANDS (for `execute()`) AND EVENT HANDLERS (for `rebuild_state_store()`)
    =============================================================
 */
 
@@ -496,7 +496,7 @@ const aggregates = {
   },
 };
 
-/* `EXECUTE()` AND `APPLY()`
+/* `EXECUTE()` AND `rebuild_state_store()`
    =========================
 */
 
@@ -508,7 +508,7 @@ var state_store = {};
    any way:
 
        * `execute()` creates the events and touches the EVENT_STORE
-       * `apply()`   creates the next state and mutates the STATE_STORE
+       * `rebuild_state_store()`   creates the next state and mutates the STATE_STORE
 
    Race conditions can be a concern  as there are a couple network requests
    towards the database between the two (see [Fallacies of distributed computing](https://en.wikipedia.org/wiki/Fallacies_of_distributed_computing)),
@@ -567,9 +567,9 @@ function execute(p) {
   return append_event_to_stream(p.stream_id, event);
 };
 
-function apply() {
+function rebuild_state_store() {
 
-  /* Fetch previous state on startup (or when executing `apply()`).
+  /* Fetch previous state on startup (or when executing `rebuild_state_store()`).
 
      TODO: Reimplement this to fetch streams lazily on demand (issue #5)
   */
@@ -623,7 +623,7 @@ function apply() {
                and  the  generated  "next_state"  is  simply
                merged  with  the  current state  (adding  or
                overwriting attributes). When  the next event
-               is  fed  to  `apply()`, it  would  query  the
+               is  fed  to  `rebuild_state_store()`, it  would  query  the
                "aggregate" attribute above,  and if missing,
                it  would yield  `undefined`  when trying  to
                find  the right  event handler,  crashing the
@@ -635,6 +635,7 @@ function apply() {
                   {
                     aggregate: event.aggregate,
                     seq: 0,
+                    event_ids: {},
                   }
               };
           }
@@ -661,7 +662,7 @@ function apply() {
           } else {
 
             state["_meta"]["seq"] = event.seq;
-            state["_meta"]["last_event_id"] = event_id;
+            state["_meta"]["event_ids"][event_id] = event.timestamp;
 
             function get_event_handler() {
 
@@ -908,7 +909,7 @@ module.exports = {
   CLIENT_APP,
   aggregates,
   execute,
-  apply,
+  rebuild_state_store,
   chain,
   state_store,
   public_commands
