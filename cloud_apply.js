@@ -87,6 +87,13 @@ function cloud_apply(firebase_app) {
           }
         }
 
+        function for_general() {
+
+          return function(event_snapshot) {
+            update_stream_state(event.fields);
+          }
+        }
+
         switch (event.event_name) {
 
           case "person_added":
@@ -125,17 +132,13 @@ function cloud_apply(firebase_app) {
               drop: true
             });
 
-          // case "session_started":
-          // case "session_time_updated":
-          // case "session_ended":
-          //   return for_multi({
-          //     attr: "sessions",
-          //   });
+          case "session_started":
+          case "session_time_updated":
+          case "session_ended":
+            return for_general();
 
-          // case "recording_added":
-          //   return for_multi({
-          //     attr: "recordings"
-          //   });
+          case "recording_added":
+            return for_general();
 
           /* No `default` case. If event is not found,
               I messed something up.
