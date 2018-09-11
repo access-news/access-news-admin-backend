@@ -789,27 +789,15 @@ const public_commands = {
 
      const user_id = create_new_stream_id();
 
-     return chain(
-       {
-         stream_id: user_id,
-         aggregate: "person",
-         start_seq: 1,
-         commands:  [
-           [ "add_person", {
-             "first_name": p.first_name,
-             "last_name":  p.last_name
-           }],
-           [ "add_email",{
-             "email": p.email
-           }],
-           // [ "add_phone_number",{
-           //     "phone_number": p.phone_number
-           // }]
-         ].concat(group_commands)
-       }
-     ).then( function() {
+    /* How to break out from the promise chain on errors:
+       https://stackoverflow.com/a/35503793/1498178
 
-       return ADMIN_APP.auth().createUser(
+       Return a `Promise.reject()` after the chain element
+       that is critical (i.e., execution should stop if that
+       one fails), and `catch` that error at the end of the
+       chain.
+    */
+     return ADMIN_APP.auth().createUser(
          {
            "disabled":    false,
            "displayName": p.username,
@@ -817,7 +805,29 @@ const public_commands = {
            "phoneNumber": p.phone_number,
            "uid":         user_id
          }
-       )
+       ).catch( function(error) {
+         return Promise.reject(error);
+       }).then( function() {
+
+        return chain(
+          {
+            stream_id: user_id,
+            aggregate: "person",
+            start_seq: 1,
+            commands:  [
+              [ "add_person", {
+                "first_name": p.first_name,
+                "last_name":  p.last_name
+              }],
+              [ "add_email",{
+                "email": p.email
+              }],
+              // [ "add_phone_number",{
+              //     "phone_number": p.phone_number
+              // }]
+            ].concat(group_commands)
+          }
+        )
      }).then( function() {
 
        /* The user gets an email upon subscribing them to change their
@@ -826,9 +836,9 @@ const public_commands = {
        */
        return CLIENT_APP.auth().sendPasswordResetEmail(p.email);
 
-     }).catch( function(e) {
+     }).catch( function(error) {
 
-       console.log(e)
+       console.log(error.errorInfo);
      });
   },
 }
@@ -916,7 +926,7 @@ module.exports = {
 };
 
 /*
-f.public_commands.add_user({first_name: "Attila", last_name: "Gulyas", username: "", email: "toraritte@gmail.com", account_types: ["admin", "reader"]})
+f.public_commands.add_user({first_name: "Attila", last_name: "Gulyas", username: "", email: "torarittegmail.com", account_types: ["admin", "reader"]})
 */
 
 /* TEST EMAIL COMMANDS
