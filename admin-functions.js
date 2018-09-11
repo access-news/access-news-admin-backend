@@ -196,7 +196,7 @@ function verify_payload_fields(p) {
   const payload_properties = Object.keys(p.payload);
 
   if (payload_properties.length !== p.required_fields.length) {
-    throw `Expected fields: ${p.required_fields}, got: ${payload_properties}`
+    throw Error(`Expected fields: ${p.required_fields}, got: ${payload_properties}`);
   }
 
   for (var i in payload_properties) {
@@ -204,7 +204,7 @@ function verify_payload_fields(p) {
     const payload_prop = payload_properties[i];
 
     if (p.required_fields.includes(payload_prop) === false) {
-      throw `Required fields ${p.required_fields} do not match ${payload_prop}`
+      throw Error(`Required fields ${p.required_fields} do not match ${payload_prop}`);
     }
 
     fields[payload_prop] = p.payload[payload_prop];
@@ -421,7 +421,7 @@ function group_constraint(fields) {
   const valid_groups = ['admins', 'listeners', 'readers'];
 
   if (valid_groups.includes(fields.group) !== true) {
-    throw `"group" must be one of ${valid_groups}`
+    throw Error(`"group" must be one of ${valid_groups}`)
   }
 }
 
@@ -552,8 +552,8 @@ function execute(p) {
   const command = aggregates[p.aggregate]["commands"][p.commandString];
 
   if (command === undefined) {
-    throw `No ${commandString} in ${p.aggregate} aggregate.
-           Choose one from ${Object.keys(aggregates[p.aggregate]["commands"])}`;
+    throw Error(`No ${commandString} in ${p.aggregate} aggregate.
+           Choose one from ${Object.keys(aggregates[p.aggregate]["commands"])}`);
   }
 
   /* Defined with `const` because `execute()`  only uses the state to inspect
