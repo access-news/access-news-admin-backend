@@ -49,32 +49,7 @@
 /* INITIALIZING FIREBASE APPS
    ==========================
 */
-
-function init_firebase_admin() {
-
-  const firebase_admin = require('firebase-admin');
-  const serviceAccount = require('./access-news-firebase-adminsdk-kvikw-e4024c68e0.json');
-
-  firebase_admin.initializeApp({
-    credential: firebase_admin.credential.cert(serviceAccount),
-    databaseURL: "https://access-news.firebaseio.com"
-  });
-
-  return firebase_admin;
-};
-
-const ADMIN_APP = init_firebase_admin();
-
-function init_firebase_client() {
-
-  const firebase_client = require('firebase');
-  const config = require('./firebase_client_config.json');
-  firebase_client.initializeApp(config);
-
-  return firebase_client;
-};
-
-const CLIENT_APP = init_firebase_client();
+const f = require('./firebase_apps.js');
 
 /* LOW LEVEL FUNCTIONS TO THE EVENT_STORE
    ======================================
@@ -141,7 +116,7 @@ function create_event(p) {
     "stream_id":  p.stream_id,
     "event_name": p.event_name,
     "fields":     p.fields,
-    "timestamp":  ADMIN_APP.database.ServerValue.TIMESTAMP,
+    "timestamp":  f.ADMIN_APP.database.ServerValue.TIMESTAMP,
     "version":    EVENT_VERSION,
     "seq":        p.seq
   };
@@ -149,7 +124,7 @@ function create_event(p) {
 }
 
 function create_new_stream_id() {
-  return ADMIN_APP.database().ref().push().key;
+  return f.ADMIN_APP.database().ref().push().key;
 }
 
 /* "stream_id" is also contained by the event, but I think it is more prudent
@@ -158,7 +133,7 @@ function create_new_stream_id() {
 */
 function append_event_to_stream(stream_id, event) {
 
-  const db = ADMIN_APP.database();
+  const db = f.ADMIN_APP.database();
   const event_id = db.ref("event_store").push().key;
 
   var updates = {};
@@ -213,7 +188,7 @@ function verify_payload_fields(p) {
   return fields;
 }
 
-function sanitize_key(key) {
+function sanitize_email(key) {
   return key.split('').map(
     function(c) {
       switch (c) {
@@ -295,14 +270,14 @@ const event_handler_factories = {
 
       if ( event.fields.from !== undefined ) {
 
-        state[p.attr][sanitize_key(event.fields.from)] = null;
+        state[p.attr][sanitize_email(event.fields.from)] = null;
         delete event.fields.from;
       }
 
       const k = Object.keys(event.fields)[0];
       const v = event["fields"][k];
 
-      state[p.attr][sanitize_key(v)] = !p.drop ? event_id : null;
+      state[p.attr][sanitize_email(v)] = !p.drop ? event_id : null;
 
       // console.log("\n");
       // console.log(state);
@@ -405,7 +380,7 @@ function command_factory(p) {
       "stream_id":  execute_params.stream_id,
       "event_name": p.event_name,
       "fields":     execute_params.callback(state, fields),
-      "timestamp":  ADMIN_APP.database.ServerValue.TIMESTAMP,
+      "timestamp":  f.ADMIN_APP.database.ServerValue.TIMESTAMP,
       "version":    EVENT_VERSION,
       "seq":        execute_params.seq
     });
@@ -573,7 +548,7 @@ function rebuild_state_store() {
 
      TODO: Reimplement this to fetch streams lazily on demand (issue #5)
   */
-  ADMIN_APP.database().ref("/state_store").once("value").then(
+  f.ADMIN_APP.database().ref("/state_store").once("value").then(
 
     function(state_snapshot){
 
@@ -589,7 +564,7 @@ function rebuild_state_store() {
 
     function() {
 
-      const event_store = ADMIN_APP.database().ref("/event_store");
+      const event_store = f.ADMIN_APP.database().ref("/event_store");
 
       event_store.on(
         'child_added',
@@ -718,7 +693,7 @@ function rebuild_state_store() {
 
             get_event_handler()(event_snapshot, state);
 
-            ADMIN_APP.database().ref("/state_store").child(stream_id).update(state);
+            f.ADMIN_APP.database().ref("/state_store").child(stream_id).update(state);
           }
         }
       );
@@ -797,7 +772,7 @@ const public_commands = {
        one fails), and `catch` that error at the end of the
        chain.
     */
-     return ADMIN_APP.auth().createUser(
+     return f.ADMIN_APP.auth().createUser(
          {
            "disabled":    false,
            "displayName": p.username,
@@ -834,7 +809,7 @@ const public_commands = {
           passwords. This is done so because reader and listener signups
           are centralized. (For now.)
        */
-       return CLIENT_APP.auth().sendPasswordResetEmail(p.email);
+       return f.CLIENT_APP.auth().sendPasswordResetEmail(p.email);
 
      }).catch( function(error) {
 
@@ -912,16 +887,7 @@ function chain(p) {
 
 module.exports = {
   create_new_stream_id,
-  verify_payload_fields,
-  append_event_to_stream,
-  EVENT_VERSION,
-  ADMIN_APP,
-  CLIENT_APP,
-  aggregates,
-  execute,
   rebuild_state_store,
-  chain,
-  state_store,
   public_commands
 };
 
