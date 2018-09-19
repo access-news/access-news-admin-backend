@@ -38,9 +38,13 @@ function desanitize_email(key) {
 
 function rebuild_projections() {
 
+  /* Responsible for 2 projections:
+     uid -> date -> recordings
+     date -> recordings
+  */
   function set_by_datetime(stream, into, aggregate, properties) {
 
-    const uid = stream.user_id;
+    // const uid = stream.user_id;
     const timestamp = Object.values(stream._meta.event_ids).pop();
     const datetimeStrings = new Date(timestamp).toISOString().split(/[T.]/).slice(0,2);
 
@@ -52,18 +56,22 @@ function rebuild_projections() {
       }, {}
     );
 
-    if (into[aggregate][uid] === undefined) {
-      into[aggregate][uid] = {};
+    // if (into[aggregate][uid] === undefined) {
+    //   into[aggregate][uid] = {};
+    // }
+
+    if (into[aggregate][datetimeStrings[0]] === undefined) {
+      into[aggregate][datetimeStrings[0]] = {};
     }
 
-    if (into[aggregate][uid][datetimeStrings[0]] === undefined) {
-      into[aggregate][uid][datetimeStrings[0]] = {};
-    }
-
-    Object.assign(into[aggregate][uid][datetimeStrings[0]], update);
+    Object.assign(into[aggregate][datetimeStrings[0]], update);
   }
 
-  function set_by_publication(stream, into, aggregate, properties) {
+  /* Responsible for 2 projections:
+     uid -> publications -> articles
+     publications -> articles
+  */
+  function set_by_reader_and_publication(stream, into, aggregate, properties) {
 
     const uid = stream.user_id;
     const pub = stream.publication;
@@ -137,7 +145,7 @@ function rebuild_projections() {
 
             case 'recording':
               set_by_datetime(stream, projections, 'recordings_by_time', ['duration', 'filename', 'publication']);
-              set_by_publication(stream, projections, 'recordings_by_publication', ['duration', 'filename']);
+              set_by_reader_publication(stream, projections, 'recordings_by_publication', ['duration', 'filename']);
 
               projections['people'][stream.user_id]['recordings'] = projections['recordings_by_publication'][stream.user_id];
               break;

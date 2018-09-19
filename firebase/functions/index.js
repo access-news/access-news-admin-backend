@@ -3,18 +3,92 @@ const functions = require('firebase-functions');
 const admin = require('firebase-admin');
 admin.initializeApp();
 
-exports.lofa = functions.database.ref('/event_store').onCreate((snap, context) => {
-  console.log(`meg ilyet: ${snap}`);
-  return null;
-})
+exports.project = functions.database.ref('/state_store/{stream_id}').onWrite(
+  function(change, context) {
 
-exports.apply = functions.database.ref("/event_store").onCreate(
+    const stream = change.after.val();
+    const stream_id = context.params.stream_id;
+    const aggregate = stream["_meta"]["aggregate"];
+    const user_id = (aggregate === 'person') ? stream_id : stream.user_id;
+
+    const t = (function timestamps(stream) {
+
+      const event_ids = Object.keys(stream._meta.event_ids);
+      const oldest_key = event_ids[0];
+      const newest_key = event_ids[event_ids.length-1];
+
+      const [created_at, updated_at] = [
+        stream._meta.event_ids[ oldest_key ],
+        stream._meta.event_ids[ newest_key ]
+      ].map(
+        function(timestamp) {
+          return new Date(timestamp).toISOString().split(/[T.Z]/).slice(0,3);
+        }
+      );
+
+      return {
+        'created_at': {
+          'date': created_at[0],
+          'time': created_at[1],
+          'ms':   created_at[2]
+        },
+        'updated_at': {
+          'date': updated_at[0],
+          'time': updated_at[1],
+          'ms':   updated_at[2]
+        }
+      };
+    })(stream);
+
+    (function put_timestamps_into_stream(stream) {
+      stream["created_at"] = `${t.created_at.date}-${t.created_at.time}:${t.created_at.ms}`;
+      stream["updated_at"] = `${t.updated_at.date}-${t.updated_at.time}:${t.created_at.ms}`;
+    })(stream);
+
+    var update = {};
+    delete stream._meta;
+
+    switch (aggregate) {
+      case 'person':
+        update[`people/${user_id}`] = stream;
+        break;
+
+      case 'session':
+        update[`sessions/by_stream/${stream_id}`] = stream;
+
+        stream["stream_id"] = stream_id;
+        update[`sessions/by_date/${t.created_at.date}/${t.created_at.time}:${t.created_at.ms}`] = stream;
+
+        update[`people/${user_id}/sessions/${t.created_at.date}/${t.created_at.time}:${t.created_at.ms}`] = stream;
+        break;
+
+      case 'recording':
+        update[`recordings/by_stream/${stream_id}`] = stream;
+
+        stream["stream_id"] = stream_id;
+        update[`recordings/by_date/${t.created_at.date}/${t.created_at.time}:${t.created_at.ms}`] = stream;
+        update[`recordings/by_datetime/${t.created_at.date}/${t.created_at.time}:${t.created_at.ms}`] = stream;
+
+        update[`people/${user_id}/recordings/${t.created_at.date}/${t.created_at.time}:${t.created_at.ms}`] = stream;
+        break;
+
+      default:
+        console.error(`No case for ${aggregate} aggregate`);
+        return null;
+    }
+
+    return admin.database().ref('/projections').update(update);
+  }
+);
+
+exports.apply = functions.database.ref("/event_store/{event_id}").onCreate(
   function(event_snapshot, context) {
 
     function dispatch_event_handler() {
 
       const event = event_snapshot.val();
-      const event_id = event_snapshot.ref.getKey();
+      const event_id = context.params.event_id;
+      console.log(event_id);
 
       const stream_id = event.stream_id;
       console.log(`stream_id: ${stream_id}`);
@@ -37,7 +111,7 @@ exports.apply = functions.database.ref("/event_store").onCreate(
       }
 
       function update_stream_state(update) {
-        update["_meta/seq"] = event.seq;
+        // update["_meta/seq"] = event.seq;
         update["_meta/aggregate"] = event.aggregate;
 
         update[`_meta/event_ids/${event_id}`] = event.timestamp;
