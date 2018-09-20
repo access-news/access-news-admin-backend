@@ -8,6 +8,8 @@ exports.project = functions.database.ref('/state_store/{stream_id}').onWrite(
 
     const stream = change.after.val();
     const stream_id = context.params.stream_id;
+    stream["stream_id"] = stream_id;
+
     const aggregate = stream["_meta"]["aggregate"];
     const user_id = (aggregate === 'person') ? stream_id : stream.user_id;
 
@@ -49,26 +51,21 @@ exports.project = functions.database.ref('/state_store/{stream_id}').onWrite(
     delete stream._meta;
 
     switch (aggregate) {
+
       case 'person':
         update[`people/${user_id}`] = stream;
         break;
 
       case 'session':
         update[`sessions/by_stream/${stream_id}`] = stream;
-
-        stream["stream_id"] = stream_id;
         update[`sessions/by_date/${t.created_at.date}/${t.created_at.time}:${t.created_at.ms}`] = stream;
-
         update[`people/${user_id}/sessions/${t.created_at.date}/${t.created_at.time}:${t.created_at.ms}`] = stream;
         break;
 
       case 'recording':
         update[`recordings/by_stream/${stream_id}`] = stream;
-
-        stream["stream_id"] = stream_id;
         update[`recordings/by_date/${t.created_at.date}/${t.created_at.time}:${t.created_at.ms}`] = stream;
         update[`recordings/by_datetime/${t.created_at.date}/${t.created_at.time}:${t.created_at.ms}`] = stream;
-
         update[`people/${user_id}/recordings/${t.created_at.date}/${t.created_at.time}:${t.created_at.ms}`] = stream;
         break;
 

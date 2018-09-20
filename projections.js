@@ -38,80 +38,11 @@ function desanitize_email(key) {
 
 function rebuild_projections() {
 
-  /* Responsible for 2 projections:
-     uid -> date -> recordings
-     date -> recordings
-  */
-  function set_by_datetime(stream, into, aggregate, properties) {
-
-    // const uid = stream.user_id;
-    const timestamp = Object.values(stream._meta.event_ids).pop();
-    const datetimeStrings = new Date(timestamp).toISOString().split(/[T.]/).slice(0,2);
-
-    const update = {};
-    update[datetimeStrings[1]] = properties.reduce(
-      function(acc, prop) {
-        acc[prop] = stream[prop];
-        return acc;
-      }, {}
-    );
-
-    // if (into[aggregate][uid] === undefined) {
-    //   into[aggregate][uid] = {};
-    // }
-
-    if (into[aggregate][datetimeStrings[0]] === undefined) {
-      into[aggregate][datetimeStrings[0]] = {};
-    }
-
-    Object.assign(into[aggregate][datetimeStrings[0]], update);
-  }
-
-  /* Responsible for 2 projections:
-     uid -> publications -> articles
-     publications -> articles
-  */
-  function set_by_reader_and_publication(stream, into, aggregate, properties) {
-
-    const uid = stream.user_id;
-    const pub = stream.publication;
-    const timestamp = Object.values(stream._meta.event_ids).pop();
-    const datetimeStrings = new Date(timestamp).toISOString().split(/[T.]/).slice(0,2).join(' ');
-
-    const update = {};
-    update[stream.stream_id] = properties.reduce(
-      function(acc, prop) {
-        acc[prop] = stream[prop];
-        return acc;
-      }, {}
-    );
-    update[stream.stream_id]['date'] = datetimeStrings;
-
-    if (into[aggregate][uid] === undefined) {
-      into[aggregate][uid] = {};
-    }
-
-    if (into[aggregate][uid][pub] === undefined) {
-      into[aggregate][uid][pub] = {};
-    }
-
-    Object.assign(into[aggregate][uid][pub], update);
-  }
-
   db.ref('/state_store').once('value').then(
     function(state_store_snapshot) {
 
       const state_store = state_store_snapshot.val();
-
-      var projections = {
-        'people': {},
-        'readers': {},
-        'listeners': {},
-        'admins': {},
-        'recordings_by_time': {},
-        'recordings_by_publication': {},
-        'sessions': {},
-      }
+      var update = {};
 
       Object.keys(state_store).forEach(
 
@@ -120,53 +51,98 @@ function rebuild_projections() {
           const stream = state_store[stream_id];
           stream["stream_id"] = stream_id;
 
-          switch (stream["_meta"]["aggregate"]) {
+          const aggregate = stream["_meta"]["aggregate"];
+          const user_id = (aggregate === 'person') ? stream_id : stream.user_id;
+
+          const t = (function timestamps(stream) {
+
+            const event_ids = Object.keys(stream._meta.event_ids);
+            const oldest_key = event_ids[0];
+            const newest_key = event_ids[event_ids.length-1];
+
+            const [created_at, updated_at] = [
+              stream._meta.event_ids[ oldest_key ],
+              stream._meta.event_ids[ newest_key ]
+            ].map(
+              function(timestamp) {
+                return new Date(timestamp).toISOString().split(/[T.Z]/).slice(0,3);
+              }
+            );
+
+            return {
+              'created_at': {
+                'date': created_at[0],
+                'time': created_at[1],
+                'ms':   created_at[2]
+              },
+              'updated_at': {
+                'date': updated_at[0],
+                'time': updated_at[1],
+                'ms':   updated_at[2]
+              }
+            };
+          })(stream);
+
+          (function put_timestamps_into_stream(stream) {
+            stream["created_at"] = `${t.created_at.date}-${t.created_at.time}:${t.created_at.ms}`;
+            stream["updated_at"] = `${t.updated_at.date}-${t.updated_at.time}:${t.created_at.ms}`;
+          })(stream);
+
+          delete stream._meta;
+
+          switch (aggregate) {
 
             case 'person':
-              delete stream._meta;
-
-              Object.assign(stream, stream.name);
-              delete stream.name;
-
-              projections['people'][stream_id] = stream;
-
-              Object.keys(stream.groups).forEach(
-                function(g) {
-                  projections[g][stream_id] = stream;
-                }
-              );
+              if (!update['people']) { update['people'] = {} }
+              update['people'][user_id] = stream;
               break;
 
             case 'session':
-              set_by_datetime(stream, projections, 'sessions', ['seconds']);
+              if (!update['sessions']) { update['sessions'] = {} }
 
-              projections['people'][stream.user_id]['sessions'] = projections['sessions'][stream.user_id];
+              if (!update['sessions']['by_stream']) { update['sessions']['by_stream'] = {} }
+              // update:
+              update['sessions']['by_stream'][stream_id] = stream;
+
+              if (!update['sessions']['by_date']) { update['sessions']['by_date'] = {} }
+              if (!update['sessions']['by_date'][t.created_at.date]) { update['sessions']['by_date'][t.created_at.date] = {} }
+              // update:
+              update['sessions']['by_date'][t.created_at.date][`${t.created_at.time}:${t.created_at.ms}`] = stream;
+
+              if (!update['people']) { update['people'] = {} }
+              if (!update['people'][user_id]) { update['people'][user_id] = {} }
+              if (!update['people'][user_id]['sessions']) { update['people'][user_id]['sessions'] = {} }
+              if (!update['people'][user_id]['sessions'][t.created_at.date]) { update['people'][user_id]['sessions'][t.created_at.date] = {} }
+              update['people'][user_id]['sessions'][t.created_at.date][`${t.created_at.time}:${t.created_at.ms}`] = stream;
               break;
 
             case 'recording':
-              set_by_datetime(stream, projections, 'recordings_by_time', ['duration', 'filename', 'publication']);
-              set_by_reader_publication(stream, projections, 'recordings_by_publication', ['duration', 'filename']);
+              if (!update['recordings']) { update['recordings'] = {} }
+              if (!update['recordings']['by_stream']) { update['recordings']['by_stream'] = {} }
+              update['recordings']['by_stream'][stream_id] = stream;
 
-              projections['people'][stream.user_id]['recordings'] = projections['recordings_by_publication'][stream.user_id];
+              if (!update['recordings']['by_date']) { update['recordings']['by_date'] = {} }
+              if (!update['recordings']['by_date'][t.created_at.date]) { update['recordings']['by_date'][t.created_at.date] = {} }
+              update['recordings']['by_date'][t.created_at.date][`${t.created_at.time}:${t.created_at.ms}`] = stream;
+
+              if (!update['recordings']['by_datetime']) { update['recordings']['by_datetime'] = {} }
+              if (!update['recordings']['by_datetime'][t.created_at.date]) { update['recordings']['by_datetime'][t.created_at.date] = {} }
+              update['recordings']['by_datetime'][t.created_at.date][`${t.created_at.time}:${t.created_at.ms}`] = stream;
+
+              if (!update['people']) { update['people'] = {} }
+              if (!update['people'][user_id]) { update['people'][user_id] = {} }
+              if (!update['people'][user_id]['recordings']) { update['people'][user_id]['recordings'] = {} }
+              if (!update['people'][user_id]['recordings'][t.created_at.date]) { update['people'][user_id]['recordings'][t.created_at.date] = {} }
+              update['people'][user_id]['recordings'][t.created_at.date][`${t.created_at.time}:${t.created_at.ms}`] = stream;
               break;
 
             default:
-              console.log('parabola of mystery');
+              console.error(`No case for ${aggregate} aggregate`);
           }
         }
       )
 
-      db.ref().child("/projections").update(projections);
-    }
-  )
-}
-
-function readers() {
-
-  db.ref("/state_store").on(
-    'child_added',
-    function(child_snapshot) {
-
+      db.ref().child("/projections").update(update);
     }
   )
 }
