@@ -43,8 +43,8 @@ exports.project = functions.database.ref('/state_store/{stream_id}').onWrite(
     })(stream);
 
     (function put_timestamps_into_stream(stream) {
-      stream["created_at"] = `${t.created_at.date}-${t.created_at.time}:${t.created_at.ms}`;
-      stream["updated_at"] = `${t.updated_at.date}-${t.updated_at.time}:${t.created_at.ms}`;
+      stream["_created_at"] = `${t.created_at.date}-${t.created_at.time}:${t.created_at.ms}`;
+      stream["_updated_at"] = `${t.updated_at.date}-${t.updated_at.time}:${t.created_at.ms}`;
     })(stream);
 
     var update = {};
@@ -53,20 +53,22 @@ exports.project = functions.database.ref('/state_store/{stream_id}').onWrite(
     switch (aggregate) {
 
       case 'person':
+        console.log(`'person' "people/${user_id}"`);
         update[`people/${user_id}`] = stream;
         break;
 
       case 'session':
+        console.log(`'session' user: ${user_id} "sessions/by_stream/${stream_id}, people/${user_id}/sessions/${stream_id}"`);
+
         update[`sessions/by_stream/${stream_id}`] = stream;
-        update[`sessions/by_date/${t.created_at.date}/${t.created_at.time}:${t.created_at.ms}`] = stream;
-        update[`people/${user_id}/sessions/${t.created_at.date}/${t.created_at.time}:${t.created_at.ms}`] = stream;
+        update[`people/${user_id}/sessions/${stream_id}`] = stream;
         break;
 
       case 'recording':
+        console.log(`'recording' user: ${user_id} "recordings/by_stream/${stream_id}, people/${user_id}/recordings/${stream_id}"`);
+
         update[`recordings/by_stream/${stream_id}`] = stream;
-        update[`recordings/by_date/${t.created_at.date}/${t.created_at.time}:${t.created_at.ms}`] = stream;
-        update[`recordings/by_datetime/${t.created_at.date}/${t.created_at.time}:${t.created_at.ms}`] = stream;
-        update[`people/${user_id}/recordings/${t.created_at.date}/${t.created_at.time}:${t.created_at.ms}`] = stream;
+        update[`people/${user_id}/recordings/${stream_id}`] = stream;
         break;
 
       default:
@@ -85,10 +87,8 @@ exports.apply = functions.database.ref("/event_store/{event_id}").onCreate(
 
       const event = event_snapshot.val();
       const event_id = context.params.event_id;
-      console.log(event_id);
 
       const stream_id = event.stream_id;
-      console.log(`stream_id: ${stream_id}`);
 
       const state_ref = admin.database().ref("/state_store").child(stream_id);
 
@@ -172,6 +172,8 @@ exports.apply = functions.database.ref("/event_store/{event_id}").onCreate(
           return update_stream_state(event.fields);
         }
       }
+
+      console.log(`stream: ${stream_id}, event: ${event_id}, "${event.event_name}"`);
 
       switch (event.event_name) {
 

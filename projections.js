@@ -84,8 +84,8 @@ function rebuild_projections() {
           })(stream);
 
           (function put_timestamps_into_stream(stream) {
-            stream["created_at"] = `${t.created_at.date}-${t.created_at.time}:${t.created_at.ms}`;
-            stream["updated_at"] = `${t.updated_at.date}-${t.updated_at.time}:${t.created_at.ms}`;
+            stream["_created_at"] = `${t.created_at.date}-${t.created_at.time}:${t.created_at.ms}`;
+            stream["_updated_at"] = `${t.updated_at.date}-${t.updated_at.time}:${t.created_at.ms}`;
           })(stream);
 
           delete stream._meta;
@@ -104,16 +104,10 @@ function rebuild_projections() {
               // update:
               update['sessions']['by_stream'][stream_id] = stream;
 
-              if (!update['sessions']['by_date']) { update['sessions']['by_date'] = {} }
-              if (!update['sessions']['by_date'][t.created_at.date]) { update['sessions']['by_date'][t.created_at.date] = {} }
-              // update:
-              update['sessions']['by_date'][t.created_at.date][`${t.created_at.time}:${t.created_at.ms}`] = stream;
-
               if (!update['people']) { update['people'] = {} }
               if (!update['people'][user_id]) { update['people'][user_id] = {} }
               if (!update['people'][user_id]['sessions']) { update['people'][user_id]['sessions'] = {} }
-              if (!update['people'][user_id]['sessions'][t.created_at.date]) { update['people'][user_id]['sessions'][t.created_at.date] = {} }
-              update['people'][user_id]['sessions'][t.created_at.date][`${t.created_at.time}:${t.created_at.ms}`] = stream;
+              update['people'][user_id]['sessions'][stream_id] = stream;
               break;
 
             case 'recording':
@@ -121,19 +115,10 @@ function rebuild_projections() {
               if (!update['recordings']['by_stream']) { update['recordings']['by_stream'] = {} }
               update['recordings']['by_stream'][stream_id] = stream;
 
-              if (!update['recordings']['by_date']) { update['recordings']['by_date'] = {} }
-              if (!update['recordings']['by_date'][t.created_at.date]) { update['recordings']['by_date'][t.created_at.date] = {} }
-              update['recordings']['by_date'][t.created_at.date][`${t.created_at.time}:${t.created_at.ms}`] = stream;
-
-              if (!update['recordings']['by_datetime']) { update['recordings']['by_datetime'] = {} }
-              if (!update['recordings']['by_datetime'][t.created_at.date]) { update['recordings']['by_datetime'][t.created_at.date] = {} }
-              update['recordings']['by_datetime'][t.created_at.date][`${t.created_at.time}:${t.created_at.ms}`] = stream;
-
               if (!update['people']) { update['people'] = {} }
               if (!update['people'][user_id]) { update['people'][user_id] = {} }
               if (!update['people'][user_id]['recordings']) { update['people'][user_id]['recordings'] = {} }
-              if (!update['people'][user_id]['recordings'][t.created_at.date]) { update['people'][user_id]['recordings'][t.created_at.date] = {} }
-              update['people'][user_id]['recordings'][t.created_at.date][`${t.created_at.time}:${t.created_at.ms}`] = stream;
+              update['people'][user_id]['recordings'][stream_id] = stream;
               break;
 
             default:
