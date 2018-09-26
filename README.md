@@ -1,6 +1,7 @@
 ### `./admin_site`
 
 The admin web app to manage users, content, etc.
+See <repo>.
 
 ### `./functions`
 
