@@ -3,7 +3,7 @@
 function admin() {
 
   const firebase_admin = require('firebase-admin');
-  const serviceAccount = require('./access-news-firebase-adminsdk-kvikw-e4024c68e0.json');
+  const serviceAccount = require('./firebase_credentials/access-news-firebase-adminsdk-kvikw-e4024c68e0.json');
 
   firebase_admin.initializeApp({
     credential: firebase_admin.credential.cert(serviceAccount),
@@ -18,7 +18,7 @@ const ADMIN_APP = admin();
 function client() {
 
   const firebase_client = require('firebase');
-  const config = require('./firebase_client_config.json');
+  const config = require('./firebase_credentials/firebase_client_config.json');
   firebase_client.initializeApp(config);
 
   return firebase_client;
